@@ -18,24 +18,21 @@ class EmployeeLoan(Document):
 		if self.repayment_method == "Repay Over Number of Periods":
 			if self.rate_of_interest:
 				monthly_interest_rate = flt(self.rate_of_interest) / (12 *100)
-				self.emi_amount = math.ceil((self.loan_amount * monthly_interest_rate * (1 + monthly_interest_rate)**self.repayment_periods) \
-					/((1 + monthly_interest_rate)**self.repayment_periods - 1))
+				self.emi_amount = math.ceil((self.loan_amount * monthly_interest_rate * 
+					(1 + monthly_interest_rate)**self.repayment_periods) \
+					/ ((1 + monthly_interest_rate)**self.repayment_periods - 1))
 			else:
 				self.emi_amount = math.ceil(flt(self.loan_amount) / self.repayment_periods)
 
 	def make_amortization_schedule(self):
 		self.amortization_schedule = []
-		payment_date = self.emi_start_date
-		interest_on_days = date_diff(self.emi_start_date, self.disbursement_date)
-
+		payment_date = self.disbursement_date
 		balance_amount = self.loan_amount
 
-		daily_interest_rate = flt(self.rate_of_interest) / (365 *100)		
-
 		while(balance_amount > 0):
-			interest_amount = math.ceil(balance_amount * flt(daily_interest_rate) * interest_on_days)
+			interest_amount = rounded(balance_amount * flt(self.rate_of_interest) / (12*100))
 			principal_amount = self.emi_amount - interest_amount
-			balance_amount = math.ceil(balance_amount + interest_amount - self.emi_amount)			
+			balance_amount = rounded(balance_amount + interest_amount - self.emi_amount)
 
 			if balance_amount < 0:
 				principal_amount += balance_amount
@@ -52,7 +49,6 @@ class EmployeeLoan(Document):
 			})
 
 			next_payment_date = add_months(payment_date, 1)
-			interest_on_days = date_diff(next_payment_date, payment_date)
 			payment_date = next_payment_date
 
 	def set_repayment_period(self):
@@ -62,6 +58,8 @@ class EmployeeLoan(Document):
 			self.repayment_periods = repayment_periods
 
 	def calculate_totals(self):
+		self.total_payment = 0
+		self.total_interest_payable = 0
 		for data in self.amortization_schedule:
 			self.total_payment += data.total_payment
 			self.total_interest_payable +=data.interest_amount
