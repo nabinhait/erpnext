@@ -546,7 +546,7 @@ class TestSalesInvoice(unittest.TestCase):
 
 	def test_outstanding(self):
 		w = self.make()
-		self.assertEquals(w.outstanding_amount, w.base_grand_total)
+		self.assertEquals((w.outstanding_amount + w.rounding_adjustment), w.base_grand_total)
 
 	def test_payment(self):
 		w = self.make()
@@ -560,7 +560,9 @@ class TestSalesInvoice(unittest.TestCase):
 		jv.insert()
 		jv.submit()
 
-		self.assertEquals(frappe.db.get_value("Sales Invoice", w.name, "outstanding_amount"), 161.8)
+		outstanding_amount = frappe.db.get_value("Sales Invoice", w.name, "outstanding_amount")
+		rounding_adjustment = frappe.db.get_value("Sales Invoice", w.name, "rounding_adjustment")
+		self.assertEquals(outstanding_amount + rounding_adjustment , 161.8)
 
 		link_data = get_dynamic_link_map().get('Sales Invoice', [])
 		link_doctypes = [d.parent for d in link_data]
@@ -569,7 +571,9 @@ class TestSalesInvoice(unittest.TestCase):
 		self.assertTrue(link_doctypes.index('GL Entry') > link_doctypes.index('Journal Entry Account'))
 
 		jv.cancel()
-		self.assertEquals(frappe.db.get_value("Sales Invoice", w.name, "outstanding_amount"), 561.8)
+		outstanding_amount = frappe.db.get_value("Sales Invoice", w.name, "outstanding_amount")
+		rounding_adjustment = frappe.db.get_value("Sales Invoice", w.name, "rounding_adjustment")
+		self.assertEquals(outstanding_amount + rounding_adjustment, 561.8)
 
 	def test_sales_invoice_gl_entry_without_perpetual_inventory(self):
 		si = frappe.copy_doc(test_records[1])
@@ -848,7 +852,8 @@ class TestSalesInvoice(unittest.TestCase):
 		self.assertTrue(frappe.db.sql("""select name from `tabJournal Entry Account`
 			where reference_name=%s and credit_in_account_currency=300""", si.name))
 
-		self.assertEqual(si.outstanding_amount, 261.8)
+		
+		self.assertEqual(si.outstanding_amount + si.rounding_adjustment, 261.8)
 
 		si.cancel()
 
@@ -1152,7 +1157,7 @@ class TestSalesInvoice(unittest.TestCase):
 		si.load_from_db()
 
 		#check outstanding after advance allocation
-		self.assertEqual(flt(si.outstanding_amount), flt(si.grand_total - si.total_advance, si.precision("outstanding_amount")))
+		self.assertEqual(flt(si.outstanding_amount + si.rounding_adjustment), flt(si.grand_total - si.total_advance, si.precision("outstanding_amount")))
 
 		#added to avoid Document has been modified exception
 		jv = frappe.get_doc("Journal Entry", jv.name)
@@ -1160,7 +1165,7 @@ class TestSalesInvoice(unittest.TestCase):
 
 		si.load_from_db()
 		#check outstanding after advance cancellation
-		self.assertEqual(flt(si.outstanding_amount), flt(si.grand_total + si.total_advance, si.precision("outstanding_amount")))
+		self.assertEqual(flt(si.outstanding_amount + si.rounding_adjustment), flt(si.grand_total + si.total_advance, si.precision("outstanding_amount")))
 
 	def test_outstanding_amount_after_advance_payment_entry_cancelation(self):
 		pe = frappe.get_doc({
@@ -1199,7 +1204,7 @@ class TestSalesInvoice(unittest.TestCase):
 		si.load_from_db()
 
 		#check outstanding after advance allocation
-		self.assertEqual(flt(si.outstanding_amount), flt(si.grand_total - si.total_advance, si.precision("outstanding_amount")))
+		self.assertEqual(flt(si.outstanding_amount + si.rounding_adjustment), flt(si.grand_total - si.total_advance, si.precision("outstanding_amount")))
 
 		#added to avoid Document has been modified exception
 		pe = frappe.get_doc("Payment Entry", pe.name)
@@ -1207,7 +1212,7 @@ class TestSalesInvoice(unittest.TestCase):
 
 		si.load_from_db()
 		#check outstanding after advance cancellation
-		self.assertEqual(flt(si.outstanding_amount), flt(si.grand_total + si.total_advance, si.precision("outstanding_amount")))
+		self.assertEqual(flt(si.outstanding_amount + si.rounding_adjustment), flt(si.grand_total + si.total_advance, si.precision("outstanding_amount")))
 
 	def test_multiple_uom_in_selling(self):
 		frappe.db.sql("""delete from `tabItem Price`
