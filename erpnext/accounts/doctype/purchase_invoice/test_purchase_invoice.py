@@ -35,7 +35,7 @@ class TestPurchaseInvoice(unittest.TestCase):
 		dl = wrapper
 
 		expected_gl_entries = {
-			"_Test Payable - _TC": [0, 1512.30],
+			"_Test Payable - _TC": [0, 1512],
 			"_Test Account Cost for Goods Sold - _TC": [1250, 0],
 			"_Test Account Shipping Charges - _TC": [100, 0],
 			"_Test Account Excise Duty - _TC": [140, 0],
@@ -44,6 +44,7 @@ class TestPurchaseInvoice(unittest.TestCase):
 			"_Test Account CST - _TC": [29.88, 0],
 			"_Test Account VAT - _TC": [156.25, 0],
 			"_Test Account Discount - _TC": [0, 168.03],
+			"Round Off - _TC": [0, 0.3],
 		}
 		gl_entries = frappe.db.sql("""select account, debit, credit from `tabGL Entry`
 			where voucher_type = 'Purchase Invoice' and voucher_no = %s""", dl.name, as_dict=1)
@@ -249,7 +250,7 @@ class TestPurchaseInvoice(unittest.TestCase):
 			where reference_type='Purchase Invoice'
 			and reference_name=%s and debit_in_account_currency=300""", pi.name))
 
-		self.assertEqual(pi.outstanding_amount, 1212.30)
+		self.assertEqual(pi.outstanding_amount + pi.rounding_adjustment, 1212.30)
 
 		pi.cancel()
 
@@ -491,7 +492,7 @@ class TestPurchaseInvoice(unittest.TestCase):
 		pi.load_from_db()
 		
 		#check outstanding after advance allocation
-		self.assertEqual(flt(pi.outstanding_amount), flt(pi.grand_total - pi.total_advance))
+		self.assertEqual(flt(pi.outstanding_amount + pi.rounding_adjustment), flt(pi.grand_total - pi.total_advance))
 		
 		#added to avoid Document has been modified exception
 		jv = frappe.get_doc("Journal Entry", jv.name)
@@ -499,7 +500,7 @@ class TestPurchaseInvoice(unittest.TestCase):
 		
 		pi.load_from_db()
 		#check outstanding after advance cancellation
-		self.assertEqual(flt(pi.outstanding_amount), flt(pi.grand_total + pi.total_advance))
+		self.assertEqual(flt(pi.outstanding_amount + pi.rounding_adjustment), flt(pi.grand_total + pi.total_advance))
 
 	def test_outstanding_amount_after_advance_payment_entry_cancelation(self):
 		pe = frappe.get_doc({
@@ -538,7 +539,7 @@ class TestPurchaseInvoice(unittest.TestCase):
 		pi.load_from_db()
 
 		#check outstanding after advance allocation
-		self.assertEqual(flt(pi.outstanding_amount), flt(pi.grand_total - pi.total_advance))
+		self.assertEqual(flt(pi.outstanding_amount + pi.rounding_adjustment), flt(pi.grand_total - pi.total_advance))
 		
 		#added to avoid Document has been modified exception
 		pe = frappe.get_doc("Payment Entry", pe.name)
@@ -546,7 +547,7 @@ class TestPurchaseInvoice(unittest.TestCase):
 		
 		pi.load_from_db()
 		#check outstanding after advance cancellation
-		self.assertEqual(flt(pi.outstanding_amount), flt(pi.grand_total + pi.total_advance))
+		self.assertEqual(flt(pi.outstanding_amount + pi.rounding_adjustment), flt(pi.grand_total + pi.total_advance))
 
 def unlink_payment_on_cancel_of_invoice(enable=1):
 	accounts_settings = frappe.get_doc("Accounts Settings")
