@@ -598,8 +598,8 @@ class PurchaseInvoice(BuyingController):
 				self.get_gl_dict({
 					"account": round_off_account,
 					"against": self.supplier,
-					"debit_in_account_currency": self.rounding_adjustment,
-					"debit": self.base_rounding_adjustment,
+					"credit_in_account_currency": self.rounding_adjustment,
+					"credit": self.base_rounding_adjustment,
 					"cost_center": round_off_cost_center,
 				}
 			))
