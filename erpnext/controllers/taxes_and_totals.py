@@ -331,8 +331,7 @@ class calculate_taxes_and_totals(object):
 				self.doc.currency, self.doc.precision("rounded_total"))
 
 			#if print_in_rate is set, we would have already calculated rounding adjustment
-			if not self.doc.rounding_adjustment:
-				self.doc.rounding_adjustment = self.doc.grand_total - self.doc.rounded_total
+			self.doc.rounding_adjustment += flt(self.doc.grand_total - self.doc.rounded_total, self.doc.precision("rounding_adjustment"))
 
 		if self.doc.meta.get_field("base_rounded_total"):
 			company_currency = erpnext.get_company_currency(self.doc.company)
@@ -341,8 +340,7 @@ class calculate_taxes_and_totals(object):
 				round_based_on_smallest_currency_fraction(self.doc.base_grand_total,
 					company_currency, self.doc.precision("base_rounded_total"))
 
-			if not self.doc.base_rounding_adjustment:
-				self.doc.base_rounding_adjustment = self.doc.base_grand_total - self.doc.base_rounded_total
+			self.doc.base_rounding_adjustment += flt(self.doc.base_grand_total - self.doc.base_rounded_total, self.doc.precision("rounding_adjustment"))
 
 	def _cleanup(self):
 		for tax in self.doc.get("taxes"):
