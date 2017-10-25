@@ -216,7 +216,8 @@ class TestSalesInvoice(unittest.TestCase):
 
 		# with inclusive tax and additional discount
 		self.assertEquals(si.net_total, 4298.25)
-		self.assertEquals(si.grand_total, 4900.00)
+		self.assertEquals(si.grand_total, 4900.01)
+		self.assertEquals(si.rounding_adjustment, 0.01)
 
 	def test_sales_invoice_discount_amount(self):
 		si = frappe.copy_doc(test_records[3])
@@ -292,9 +293,9 @@ class TestSalesInvoice(unittest.TestCase):
 			for i, k in enumerate(expected_values["keys"]):
 				self.assertEquals(d.get(k), expected_values[d.account_head][i])
 
-		self.assertEquals(si.base_grand_total, 1500)
-		self.assertEquals(si.grand_total, 1500)
-		self.assertEquals(si.rounding_adjustment, -0.01)
+		self.assertEquals(si.base_grand_total, 1500.01)
+		self.assertEquals(si.grand_total, 1500.01)
+		self.assertEquals(si.rounding_adjustment, 0.01)
 
 	def test_discount_amount_gl_entry(self):
 		frappe.db.set_value("Company", "_Test Company", "round_off_account", "Round Off - _TC")

@@ -221,12 +221,6 @@ class calculate_taxes_and_totals(object):
 					self._set_in_company_currency(tax,
 						["total", "tax_amount", "tax_amount_after_discount_amount"])
 
-					# adjust Discount Amount loss in last tax iteration
-					if i == (len(self.doc.get("taxes")) - 1) and self.discount_amount_applied \
-						and self.doc.discount_amount and self.doc.apply_discount_on == "Grand Total":
-							self.doc.rounding_adjustment = flt(self.doc.grand_total
-								- flt(self.doc.discount_amount) - tax.total,
-								self.doc.precision("rounding_adjustment"))
 
 	def get_tax_amount_if_for_valuation_or_deduction(self, tax_amount, tax):
 		# if just for valuation, do not add the tax amount in total
@@ -336,8 +330,7 @@ class calculate_taxes_and_totals(object):
 			self.doc.rounded_total = round_based_on_smallest_currency_fraction(self.doc.grand_total,
 				self.doc.currency, self.doc.precision("rounded_total"))
 			#if print_in_rate is set, we would have already calculated rounding adjustment
-			if not self.doc.rounding_adjustment:
-				self.doc.rounding_adjustment = self.doc.grand_total - self.doc.rounded_total
+			self.doc.rounding_adjustment += flt(self.doc.grand_total - self.doc.rounded_total, self.doc.precision("rounding_adjustment"))
 
 		if self.doc.meta.get_field("base_rounded_total"):
 			company_currency = erpnext.get_company_currency(self.doc.company)
@@ -345,8 +338,7 @@ class calculate_taxes_and_totals(object):
 			self.doc.base_rounded_total = \
 				round_based_on_smallest_currency_fraction(self.doc.base_grand_total,
 					company_currency, self.doc.precision("base_rounded_total"))
-			if not self.doc.base_rounding_adjustment:
-				self.doc.base_rounding_adjustment = self.doc.base_grand_total - self.doc.base_rounded_total
+			self.doc.base_rounding_adjustment += flt(self.doc.base_grand_total - self.doc.base_rounded_total, self.doc.precision("rounding_adjustment"))
 
 	def _cleanup(self):
 		for tax in self.doc.get("taxes"):
