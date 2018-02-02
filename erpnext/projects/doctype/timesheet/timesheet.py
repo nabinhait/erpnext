@@ -328,6 +328,8 @@ def make_sales_invoice(source_name, item_code=None, customer=None):
 	timesheet = frappe.get_doc('Timesheet', source_name)
 
 	hours = flt(timesheet.total_billable_hours) - flt(timesheet.total_billed_hours)
+	if hours == 0:
+		frappe.throw(_("Timesheet is already fully billed"))
 	billing_amount = flt(timesheet.total_billable_amount) - flt(timesheet.total_billed_amount)
 	billing_rate = billing_amount / hours
 
