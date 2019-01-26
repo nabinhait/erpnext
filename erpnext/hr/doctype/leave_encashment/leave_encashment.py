@@ -32,6 +32,7 @@ class LeaveEncashment(Document):
 		additional_salary.salary_component = frappe.get_value("Leave Type", self.leave_type, "earning_component")
 		additional_salary.payroll_date = self.encashment_date
 		additional_salary.amount = self.encashment_amount
+		additional_salary.overwrite_salary_structure_amount = 1
 		additional_salary.submit()
 
 		self.db_set("additional_salary", additional_salary.name)
