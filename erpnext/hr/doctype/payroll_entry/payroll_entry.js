@@ -57,17 +57,6 @@ frappe.ui.form.on('Payroll Entry', {
 		})
 	},
 
-	create_salary_slips: function(frm) {
-		frm.call({
-			doc: frm.doc,
-			method: "create_salary_slips",
-			callback: function(r) {
-				frm.refresh();
-				frm.toolbar.refresh();
-			}
-		})
-	},
-
 	add_context_buttons: function(frm) {
 		if(frm.doc.salary_slips_submitted) {
 			frm.events.add_bank_entry_button(frm);

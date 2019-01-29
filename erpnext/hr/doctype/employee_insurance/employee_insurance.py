@@ -37,7 +37,7 @@ class EmployeeInsurance(Document):
 					and is_recurring = 1
 				order by payroll_date
 				limit 1
-			""")
+			""", (self.doctype, self.name))
 			if first_recurring_additional_salary:
 				addl_salary = frappe.get_doc("Additional Salary", first_recurring_additional_salary[0][0])
 				addl_salary.to_date = self.premium_end_date

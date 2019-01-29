@@ -23,6 +23,13 @@ erpnext.salary_slip_deductions_report = {
 			options: "Branch",
 		},
 		{
+			fieldname: "year",
+			label: __("Year"),
+			fieldtype: "Select",
+			options: "2018\n2019\n2020\n2021\n2022\n2023\n2024\n2025\n2026\n2027\n2028\n2029\n2030",
+			"default": new Date().getFullYear()
+		},
+		{
 			fieldname: "period",
 			label: __("Period"),
 			fieldtype: "Select",
@@ -43,6 +50,5 @@ erpnext.salary_slip_deductions_report = {
 			default: new Date().getMonth() + 1,
 			reqd: 1
 		}
-
 	]
 }
