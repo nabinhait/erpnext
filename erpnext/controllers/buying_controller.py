@@ -220,7 +220,7 @@ class BuyingController(StockController):
 				"backflush_raw_materials_of_subcontract_based_on")
 			if (self.doctype == 'Purchase Receipt' and
 				backflush_raw_materials_based_on != 'BOM'):
-				self.update_raw_materials_supplied_based_on_stock_entries(raw_material_table)
+				self.update_raw_materials_supplied_based_on_stock_entries()
 			else:
 				for item in self.get("items"):
 					if self.doctype in ["Purchase Receipt", "Purchase Invoice"]:
@@ -240,41 +240,68 @@ class BuyingController(StockController):
 		if self.is_subcontracted == "No" and self.get("supplied_items"):
 			self.set('supplied_items', [])
 
-	def update_raw_materials_supplied_based_on_stock_entries(self, raw_material_table):
-		self.set(raw_material_table, [])
-		purchase_orders = [d.purchase_order for d in self.items]
-		if purchase_orders:
-			items = get_subcontracted_raw_materials_from_se(purchase_orders)
-			backflushed_raw_materials = get_backflushed_subcontracted_raw_materials_from_se(purchase_orders, self.name)
+	def update_raw_materials_supplied_based_on_stock_entries(self):
+		self.set('supplied_items', [])
 
-			for d in items:
-				qty = d.qty - backflushed_raw_materials.get(d.item_code, 0)
-				rm = self.append(raw_material_table, {})
-				rm.rm_item_code = d.item_code
-				rm.item_name = d.item_name
-				rm.main_item_code = d.main_item_code
-				rm.description = d.description
-				rm.stock_uom = d.stock_uom
+		purchase_orders = set([d.purchase_order for d in self.items])
+
+		# qty of raw materials backflushed (for each item per purchase order)
+		backflushed_raw_materials = get_backflushed_subcontracted_raw_materials(purchase_orders)
+
+		# qty of "finished good" item yet to be received
+		qty_to_be_received_map = get_qty_to_be_received(purchase_orders)
+
+		for item in self.get('items'):
+			# reset raw_material cost
+			item.rm_supp_cost = 0
+
+			# qty of raw materials transferred to the supplier
+			transferred_raw_materials = get_subcontracted_raw_materials_from_se(item.purchase_order, item.item_code)
+
+			non_stock_items = get_non_stock_items(item.purchase_order, item.item_code)
+
+			item_key = '{}{}'.format(item.item_code, item.purchase_order)
+
+			for raw_material in transferred_raw_materials + non_stock_items:
+				fg_yet_to_be_received = qty_to_be_received_map.get(item_key)
+
+				consumed_qty = backflushed_raw_materials.get(item_key, 0)
+				transferred_qty = raw_material.qty
+
+				available_qty = transferred_qty - consumed_qty
+
+				# backflush all remaining transferred qty in the last Purchase Receipt
+				if fg_yet_to_be_received == item.qty:
+					qty = available_qty
+				else:
+					qty = frappe.utils.ceil((available_qty / fg_yet_to_be_received) * item.qty)
+
+				if qty > available_qty:
+					qty = available_qty
+
+				rm = self.append('supplied_items', {})
+				rm.update(raw_material)
+
 				rm.required_qty = qty
 				rm.consumed_qty = qty
-				rm.serial_no = d.serial_no
-				rm.batch_no = d.batch_no
 
-				# get raw materials rate
-				from erpnext.stock.utils import get_incoming_rate
-				rm.rate = get_incoming_rate({
-					"item_code": d.item_code,
-					"warehouse": self.supplier_warehouse,
-					"posting_date": self.posting_date,
-					"posting_time": self.posting_time,
-					"qty": -1 * qty,
-					"serial_no": rm.serial_no
-				})
-				if not rm.rate:
-					rm.rate = get_valuation_rate(d.item_code, self.supplier_warehouse,
-						self.doctype, self.name, currency=self.company_currency, company = self.company)
+				if not raw_material.get('non_stock_item'):
+					from erpnext.stock.utils import get_incoming_rate
+					rm.rate = get_incoming_rate({
+						"item_code": raw_material.rm_item_code,
+						"warehouse": self.supplier_warehouse,
+						"posting_date": self.posting_date,
+						"posting_time": self.posting_time,
+						"qty": -1 * qty,
+						"serial_no": rm.serial_no
+					})
+
+					if not rm.rate:
+						rm.rate = get_valuation_rate(raw_material.item_code, self.supplier_warehouse,
+							self.doctype, self.name, currency=self.company_currency, company=self.company)
 
 				rm.amount = qty * flt(rm.rate)
+				item.rm_supp_cost += rm.amount
 
 	def update_raw_materials_supplied_based_on_bom(self, item, raw_material_table):
 		exploded_item = 1
@@ -386,9 +413,11 @@ class BuyingController(StockController):
 			item_codes = list(set(item.item_code for item in
 				self.get("items")))
 			if item_codes:
-				self._sub_contracted_items = [r[0] for r in frappe.db.sql("""select name
-					from `tabItem` where name in (%s) and is_sub_contracted_item=1""" % \
-					(", ".join((["%s"]*len(item_codes))),), item_codes)]
+				items = frappe.get_all('Item', filters={
+					'name': ['in', item_codes],
+					'is_sub_contracted_item': 1
+				})
+				self._sub_contracted_items = [item.name for item in items]
 
 		return self._sub_contracted_items
 
@@ -739,28 +768,43 @@ def get_items_from_bom(item_code, bom, exploded_item=1):
 
 	return bom_items
 
-def get_subcontracted_raw_materials_from_se(purchase_orders):
-	return frappe.db.sql("""
-		select
-			sed.item_name, sed.item_code, sum(sed.qty) as qty, sed.description,
-			sed.stock_uom, sed.subcontracted_item as main_item_code, sed.serial_no, sed.batch_no
-		from `tabStock Entry` se,`tabStock Entry Detail` sed
-		where
-			se.name = sed.parent and se.docstatus=1 and se.purpose='Send to Subcontractor'
-			and se.purchase_order in (%s) and ifnull(sed.t_warehouse, '') != ''
-		group by sed.item_code, sed.t_warehouse
-	""" % (','.join(['%s'] * len(purchase_orders))), tuple(purchase_orders), as_dict=1)
+def get_subcontracted_raw_materials_from_se(purchase_order, fg_item):
+	raw_materials = frappe.db.sql("""
+		SELECT
+			sed.item_code AS rm_item_code,
+			SUM(sed.qty) AS qty,
+			sed.description,
+			sed.stock_uom,
+			sed.subcontracted_item AS main_item_code,
+			sed.serial_no,
+			sed.batch_no
+		FROM `tabStock Entry` se,`tabStock Entry Detail` sed
+		WHERE
+			se.name = sed.parent
+			AND se.docstatus=1
+			AND se.purpose='Send to Subcontractor'
+			AND se.purchase_order = %s
+			AND IFNULL(sed.t_warehouse, '') != ''
+			AND sed.subcontracted_item = %s
+		GROUP BY sed.item_code, sed.subcontracted_item
+	""", (purchase_order, fg_item), as_dict=1)
 
-def get_backflushed_subcontracted_raw_materials_from_se(purchase_orders, purchase_receipt):
+	return raw_materials
+
+def get_backflushed_subcontracted_raw_materials(purchase_orders):
 	return frappe._dict(frappe.db.sql("""
-		select
-			prsi.rm_item_code as item_code, sum(prsi.consumed_qty) as qty
-		from `tabPurchase Receipt` pr, `tabPurchase Receipt Item` pri, `tabPurchase Receipt Item Supplied` prsi
-		where
-			pr.name = pri.parent and pr.name = prsi.parent and pri.purchase_order in (%s)
-			and pri.item_code = prsi.main_item_code and pr.name != '%s' and pr.docstatus = 1
-		group by prsi.rm_item_code
-	""" % (','.join(['%s'] * len(purchase_orders)), purchase_receipt), tuple(purchase_orders)))
+		SELECT
+			CONCAT(prsi.rm_item_code, pri.purchase_order) AS item_key,
+			SUM(prsi.consumed_qty) AS qty
+		FROM `tabPurchase Receipt` pr, `tabPurchase Receipt Item` pri, `tabPurchase Receipt Item Supplied` prsi
+		WHERE
+			pr.name = pri.parent
+			AND pr.name = prsi.parent
+			AND pri.purchase_order IN %s
+			AND pri.item_code = prsi.main_item_code
+			AND pr.docstatus = 1
+		GROUP BY prsi.rm_item_code, pri.purchase_order
+	""", (purchase_orders, )))
 
 def get_asset_item_details(asset_items):
 	asset_items_data = {}
@@ -793,3 +837,31 @@ def validate_item_type(doc, fieldname, message):
 			error_message = _("Following item {0} is not marked as {1} item. You can enable them as {1} item from its Item master".format(items, message))
 
 		frappe.throw(error_message)
+
+def get_qty_to_be_received(purchase_orders):
+	return frappe._dict(frappe.db.sql("""
+		SELECT CONCAT(poi.`item_code`, poi.`parent`) AS item_key,
+		SUM(poi.`qty`) - SUM(poi.`received_qty`) AS qty_to_be_received
+		FROM `tabPurchase Order Item` poi
+		WHERE
+			poi.`parent` in %s
+		GROUP BY poi.`item_code`, poi.`parent`
+	""", (purchase_orders)))
+
+def get_non_stock_items(purchase_order, fg_item_code):
+	return frappe.db.sql("""
+		SELECT
+			pois.main_item_code,
+			pois.rm_item_code,
+			item.description,
+			pois.required_qty AS qty,
+			pois.rate,
+			1 as non_stock_item,
+			pois.stock_uom
+		FROM `tabPurchase Order Item Supplied` pois, `tabItem` item
+		WHERE
+			pois.`rm_item_code` = item.`name`
+			AND item.is_stock_item = 0
+			AND pois.`parent` = %s
+			AND pois.`main_item_code` = %s
+	""", (purchase_order, fg_item_code), as_dict=1)
