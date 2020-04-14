@@ -194,8 +194,7 @@ frappe.ui.form.on("Expense Claim", {
 			}, __("View"));
 		}
 
-		if (frm.doc.docstatus===1 && !cint(frm.doc.is_paid) && cint(frm.doc.grand_total) > 0
-				&& (cint(frm.doc.total_amount_reimbursed) < cint(frm.doc.total_sanctioned_amount))
+		if (frm.doc.docstatus===1 && !cint(frm.doc.is_paid) && cint(frm.doc.outstanding_amount) > 0
 				&& frappe.model.can_create("Payment Entry")) {
 			frm.add_custom_button(__('Payment'),
 				function() { frm.events.make_payment_entry(frm); }, __('Create'));
@@ -203,9 +202,8 @@ frappe.ui.form.on("Expense Claim", {
 	},
 
 	calculate_grand_total: function(frm) {
-		var grand_total = flt(frm.doc.total_sanctioned_amount) + flt(frm.doc.total_taxes_and_charges) - flt(frm.doc.total_advance_amount);
+		var grand_total = flt(frm.doc.total_sanctioned_amount) + flt(frm.doc.total_taxes_and_charges);
 		frm.set_value("grand_total", grand_total);
-		frm.refresh_fields();
 	},
 
 	grand_total: function(frm) {
@@ -213,7 +211,6 @@ frappe.ui.form.on("Expense Claim", {
 	},
 
 	update_employee_advance_claimed_amount: function(frm) {
-		console.log("update_employee_advance_claimed_amount")
 		let amount_to_be_allocated = frm.doc.grand_total;
 		$.each(frm.doc.advances || [], function(i, advance){
 			if (amount_to_be_allocated >= advance.unclaimed_amount){
