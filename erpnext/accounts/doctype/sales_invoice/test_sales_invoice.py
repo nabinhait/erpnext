@@ -789,7 +789,7 @@ class TestSalesInvoice(unittest.TestCase):
 		self.assertEqual(pos.write_off_amount, -5)
 
 	def test_make_pos_invoice(self):
-		from erpnext.accounts.doctype.sales_invoice.pos import make_invoice
+		from erpnext.accounts.page.pos.pos import make_invoice
 
 		pos_profile = make_pos_profile()
 
@@ -825,7 +825,7 @@ class TestSalesInvoice(unittest.TestCase):
 		self.pos_gl_entry(si, pos, 50)
 
 	def test_make_pos_invoice_in_draft(self):
-		from erpnext.accounts.doctype.sales_invoice.pos import make_invoice
+		from erpnext.accounts.page.pos.pos import make_invoice
 		from erpnext.stock.doctype.item.test_item import make_item
 
 		allow_negative_stock = frappe.db.get_single_value('Stock Settings', 'allow_negative_stock')

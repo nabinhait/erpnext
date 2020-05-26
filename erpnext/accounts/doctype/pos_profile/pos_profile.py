@@ -5,7 +5,7 @@ from __future__ import unicode_literals
 import frappe
 from frappe import msgprint, _
 from frappe.utils import cint, now
-from erpnext.accounts.doctype.sales_invoice.pos import get_child_nodes
+from erpnext.accounts.page.pos.pos import get_child_nodes
 from erpnext.accounts.doctype.sales_invoice.sales_invoice import set_account_for_mode_of_payment
 from six import iteritems
 from frappe.model.document import Document
@@ -74,9 +74,6 @@ class POSProfile(Document):
 		if not self.customer_group:
 			frappe.throw(_("Customer Group is Required in POS Profile"), title="Mandatory Field")
 
-	def before_save(self):
-		set_account_for_mode_of_payment(self)
-
 	def on_update(self):
 		self.set_defaults()
 
@@ -113,7 +110,7 @@ def get_item_groups(pos_profile):
 
 @frappe.whitelist()
 def get_series():
-	return frappe.get_meta("Sales Invoice").get_field("naming_series").options or ""
+	return frappe.get_meta("POS Invoice").get_field("naming_series").options or "s"
 
 def pos_profile_query(doctype, txt, searchfield, start, page_len, filters):
 	user = frappe.session['user']

@@ -383,7 +383,7 @@ class SellingController(StockController):
 			return
 
 		for d in self.get('items'):
-			if self.doctype == "Sales Invoice":
+			if self.doctype in ("Sales Invoice", "POS Invoice"):
 				e = [d.item_code, d.description, d.warehouse, d.sales_order or d.delivery_note, d.batch_no or '']
 				f = [d.item_code, d.description, d.sales_order or d.delivery_note]
 			elif self.doctype == "Delivery Note":

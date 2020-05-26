@@ -1,0 +1,46 @@
+{
+ "creation": "2018-05-30 09:11:22.535470",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "account_head",
+  "rate",
+  "amount"
+ ],
+ "fields": [
+  {
+   "fieldname": "rate",
+   "fieldtype": "Percent",
+   "in_list_view": 1,
+   "label": "Rate",
+   "read_only": 1
+  },
+  {
+   "fieldname": "amount",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Amount",
+   "read_only": 1
+  },
+  {
+   "fieldname": "account_head",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Account Head",
+   "options": "Account",
+   "read_only": 1
+  }
+ ],
+ "istable": 1,
+ "modified": "2020-03-05 23:22:36.524292",
+ "modified_by": "Administrator",
+ "module": "Selling",
+ "name": "POS Closing Entry Taxes",
+ "owner": "Administrator",
+ "permissions": [],
+ "quick_entry": 1,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 1
+}

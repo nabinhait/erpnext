@@ -13,6 +13,7 @@
   "customer_name",
   "tax_id",
   "is_pos",
+  "is_consolidated",
   "pos_profile",
   "offline_pos_name",
   "is_return",
@@ -1565,6 +1566,13 @@
   {
    "fieldname": "dimension_col_break",
    "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "is_consolidated",
+   "fieldtype": "Check",
+   "label": "Is Consolidated",
+   "read_only": 1
   },
   {
    "default": "0",
