@@ -17,7 +17,6 @@ class AssetMovementItem(Document):
 
 		asset: DF.Link
 		asset_name: DF.Data | None
-		company: DF.Link | None
 		from_employee: DF.Link | None
 		parent: DF.Data
 		parentfield: DF.Data

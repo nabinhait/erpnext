@@ -1,10 +1,10 @@
 {
+ "actions": [],
  "creation": "2019-10-07 18:49:00.737806",
  "doctype": "DocType",
  "editable_grid": 1,
  "engine": "InnoDB",
  "field_order": [
-  "company",
   "asset",
   "source_location",
   "from_employee",
@@ -20,7 +20,8 @@
    "in_list_view": 1,
    "label": "Asset",
    "options": "Asset",
-   "reqd": 1
+   "reqd": 1,
+   "search_index": 1
   },
   {
    "fetch_from": "asset.asset_name",
@@ -30,50 +31,56 @@
    "read_only": 1
   },
   {
+   "depends_on": "eval:parent.purpose==\"Transfer\"",
+   "fetch_from": "asset.location",
    "fieldname": "source_location",
    "fieldtype": "Link",
    "in_list_view": 1,
    "label": "Source Location",
-   "options": "Location"
+   "options": "Location",
+   "read_only": 1
   },
   {
+   "depends_on": "eval:parent.purpose!=\"Transfer\"",
    "fieldname": "target_location",
    "fieldtype": "Link",
    "in_list_view": 1,
    "label": "Target Location",
-   "options": "Location"
+   "mandatory_depends_on": "eval:parent.purpose==\"Transfer\"",
+   "options": "Location",
+   "read_only_depends_on": "eval:parent.purpose!=\"Transfer\""
   },
   {
+   "depends_on": "eval:parent.purpose==\"Receipt\"",
+   "fetch_from": "asset.custodian",
    "fieldname": "from_employee",
    "fieldtype": "Link",
    "ignore_user_permissions": 1,
    "in_list_view": 1,
    "label": "From Employee",
-   "options": "Employee"
+   "mandatory_depends_on": "eval:parent.purpose==\"Receipt\"",
+   "options": "Employee",
+   "read_only_depends_on": "eval:parent.purpose!=\"Receipt\""
   },
   {
+   "depends_on": "eval:parent.purpose==\"Issue\"",
    "fieldname": "to_employee",
    "fieldtype": "Link",
    "ignore_user_permissions": 1,
    "in_list_view": 1,
    "label": "To Employee",
-   "options": "Employee"
+   "mandatory_depends_on": "eval:parent.purpose==\"Issue\"",
+   "options": "Employee",
+   "read_only_depends_on": "eval:parent.purpose!=\"Issue\""
   },
   {
    "fieldname": "column_break_2",
    "fieldtype": "Column Break"
-  },
-  {
-   "fieldname": "company",
-   "fieldtype": "Link",
-   "hidden": 1,
-   "label": "Company",
-   "options": "Company",
-   "read_only": 1
   }
  ],
  "istable": 1,
- "modified": "2019-10-09 15:59:08.265141",
+ "links": [],
+ "modified": "2024-03-27 18:34:45.342371",
  "modified_by": "Administrator",
  "module": "Assets",
  "name": "Asset Movement Item",
@@ -82,5 +89,6 @@
  "quick_entry": 1,
  "sort_field": "modified",
  "sort_order": "DESC",
+ "states": [],
  "track_changes": 1
 }

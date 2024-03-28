@@ -9,7 +9,6 @@
   "asset",
   "column_break_vkdy",
   "date",
-  "column_break_kkxv",
   "user",
   "section_break_romx",
   "subject"
@@ -25,6 +24,7 @@
    "print_width": "165",
    "read_only": 1,
    "reqd": 1,
+   "search_index": 1,
    "width": "165"
   },
   {
@@ -66,16 +66,12 @@
    "read_only": 1,
    "reqd": 1,
    "width": "150"
-  },
-  {
-   "fieldname": "column_break_kkxv",
-   "fieldtype": "Column Break"
   }
  ],
  "in_create": 1,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2023-09-29 15:56:17.608643",
+ "modified": "2024-03-27 17:49:08.040504",
  "modified_by": "Administrator",
  "module": "Assets",
  "name": "Asset Activity",
