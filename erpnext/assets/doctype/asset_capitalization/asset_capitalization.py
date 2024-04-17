@@ -234,7 +234,7 @@ class AssetCapitalization(StockController):
 			target_asset = self.get_asset_for_validation(self.target_asset)
 
 			if not target_asset.is_composite_asset:
-				frappe.throw(_("Target Asset {0} needs to be composite asset").format(target_asset.name))
+				frappe.throw(_("Target Asset {0} needs to be a composite asset").format(target_asset.name))
 
 			if target_asset.item_code != self.target_item_code:
 				frappe.throw(
@@ -243,14 +243,12 @@ class AssetCapitalization(StockController):
 					)
 				)
 
-			if target_asset.status in ("Scrapped", "Sold", "Capitalized", "Decapitalized"):
+			if target_asset.status in ("Scrapped", "Sold"):
 				frappe.throw(
 					_("Target Asset {0} cannot be {1}").format(target_asset.name, target_asset.status)
 				)
 
-			if target_asset.docstatus == 1:
-				frappe.throw(_("Target Asset {0} cannot be submitted").format(target_asset.name))
-			elif target_asset.docstatus == 2:
+			if target_asset.docstatus == 2:
 				frappe.throw(_("Target Asset {0} cannot be cancelled").format(target_asset.name))
 
 			if target_asset.company != self.company:

@@ -80,6 +80,7 @@ class Asset(AccountsController):
 		insured_value: DF.Data | None
 		insurer: DF.Data | None
 		is_composite_asset: DF.Check
+		is_composite_component: DF.Check
 		is_existing_asset: DF.Check
 		is_fully_depreciated: DF.Check
 		item_code: DF.Link
@@ -153,7 +154,7 @@ class Asset(AccountsController):
 		self.validate_in_use_date()
 		self.make_asset_movement()
 		self.reload()
-		if not self.booked_fixed_asset and self.validate_make_gl_entry():
+		if not self.is_composite_component and not self.booked_fixed_asset and self.validate_make_gl_entry():
 			self.make_gl_entries()
 		if self.calculate_depreciation and not self.split_from:
 			convert_draft_asset_depr_schedules_into_active(self)
@@ -169,8 +170,9 @@ class Asset(AccountsController):
 		cancel_asset_depr_schedules(self)
 		self.set_status()
 		self.ignore_linked_doctypes = ("GL Entry", "Stock Ledger Entry")
-		make_reverse_gl_entries(voucher_type="Asset", voucher_no=self.name)
-		self.db_set("booked_fixed_asset", 0)
+		if not self.is_composite_component:
+			make_reverse_gl_entries(voucher_type="Asset", voucher_no=self.name)
+			self.db_set("booked_fixed_asset", 0)
 		add_asset_activity(self.name, _("Asset cancelled"))
 
 	def after_insert(self):
@@ -802,15 +804,19 @@ def make_post_gl_entry():
 
 	for asset_category in asset_categories:
 		if cint(asset_category.enable_cwip_accounting):
-			assets = frappe.db.sql_list(
-				""" select name from `tabAsset`
-				where asset_category = %s and ifnull(booked_fixed_asset, 0) = 0
-				and available_for_use_date = %s""",
-				(asset_category.name, nowdate()),
+			assets = frappe.get_all(
+				"Asset",
+				filters={
+					"asset_category": asset_category.name,
+					"booked_fixed_asset": 0,
+					"is_composite_component": 0,
+					"docstatus": 1,
+					"available_for_use_date": nowdate(),
+				},
 			)
 
 			for asset in assets:
-				doc = frappe.get_doc("Asset", asset)
+				doc = frappe.get_doc("Asset", asset.name)
 				doc.make_gl_entries()
 
 
