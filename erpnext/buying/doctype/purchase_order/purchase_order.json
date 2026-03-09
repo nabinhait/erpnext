@@ -18,7 +18,6 @@
   "order_confirmation_date",
   "column_break_7",
   "transaction_date",
-  "transaction_time",
   "schedule_date",
   "column_break1",
   "is_subcontracted",
@@ -252,6 +251,7 @@
    "allow_on_submit": 1,
    "fieldname": "schedule_date",
    "fieldtype": "Date",
+   "in_list_view": 1,
    "label": "Required By"
   },
   {
@@ -1312,14 +1312,6 @@
   {
    "fieldname": "section_break_tnkm",
    "fieldtype": "Section Break"
-  },
-  {
-   "default": "Now",
-   "depends_on": "is_internal_supplier",
-   "fieldname": "transaction_time",
-   "fieldtype": "Time",
-   "label": "Time",
-   "mandatory_depends_on": "is_internal_supplier"
   }
  ],
  "grid_page_length": 50,
@@ -1327,7 +1319,7 @@
  "idx": 105,
  "is_submittable": 1,
  "links": [],
- "modified": "2026-03-02 00:40:47.119584",
+ "modified": "2026-03-09 15:41:18.551847",
  "modified_by": "Administrator",
  "module": "Buying",
  "name": "Purchase Order",
