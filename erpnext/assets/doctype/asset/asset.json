@@ -58,7 +58,6 @@
   "accounting_dimensions_section",
   "cost_center",
   "column_break_rjyw",
-  "asset_owner_section",
   "asset_owner",
   "column_break_yeds",
   "asset_owner_company",
@@ -169,6 +168,8 @@
   {
    "fieldname": "company",
    "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
    "label": "Company",
    "options": "Company",
    "remember_last_selected_value": 1,
@@ -574,11 +575,6 @@
    "label": "Item Name"
   },
   {
-   "fieldname": "asset_owner_section",
-   "fieldtype": "Section Break",
-   "label": "Ownership"
-  },
-  {
    "fieldname": "column_break_yeds",
    "fieldtype": "Column Break"
   }
@@ -624,7 +620,7 @@
    "link_fieldname": "target_asset"
   }
  ],
- "modified": "2026-02-05 12:42:45.350216",
+ "modified": "2026-03-09 15:48:00.311821",
  "modified_by": "Administrator",
  "module": "Assets",
  "name": "Asset",
