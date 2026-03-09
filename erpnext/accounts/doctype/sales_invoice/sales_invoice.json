@@ -219,7 +219,6 @@
   "column_break_140",
   "to_date",
   "update_auto_repeat_reference",
-  "utm_analytics_section",
   "utm_source",
   "utm_medium",
   "column_break_ixxw",
@@ -381,6 +380,8 @@
    "fieldtype": "Date",
    "hide_days": 1,
    "hide_seconds": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
    "label": "Date",
    "no_copy": 1,
    "oldfieldname": "posting_date",
@@ -415,6 +416,7 @@
    "fieldtype": "Date",
    "hide_days": 1,
    "hide_seconds": 1,
+   "in_list_view": 1,
    "label": "Payment Due Date",
    "no_copy": 1,
    "oldfieldname": "due_date",
@@ -1639,6 +1641,7 @@
    "fieldtype": "Select",
    "hide_days": 1,
    "hide_seconds": 1,
+   "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Status",
    "length": 30,
@@ -2305,12 +2308,6 @@
    "fieldtype": "Column Break"
   },
   {
-   "collapsible": 1,
-   "fieldname": "utm_analytics_section",
-   "fieldtype": "Section Break",
-   "label": "UTM Analytics"
-  },
-  {
    "fieldname": "section_break_vacb",
    "fieldtype": "Section Break"
   },
@@ -2330,7 +2327,7 @@
    "link_fieldname": "consolidated_invoice"
   }
  ],
- "modified": "2026-02-28 17:58:56.453076",
+ "modified": "2026-03-09 16:10:35.479694",
  "modified_by": "Administrator",
  "module": "Accounts",
  "name": "Sales Invoice",
