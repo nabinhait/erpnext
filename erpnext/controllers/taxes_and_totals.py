@@ -408,7 +408,22 @@ class calculate_taxes_and_totals:
 
 		if hasattr(self.doc, "shipping_rule") and self.doc.shipping_rule:
 			shipping_rule = frappe.get_doc("Shipping Rule", self.doc.shipping_rule)
+			prev_shipping = flt(
+				next((t.tax_amount for t in self.doc.taxes if t.account_head == shipping_rule.account), 0.0)
+			)
 			shipping_rule.apply(self.doc)
+			new_shipping = flt(
+				next((t.tax_amount for t in self.doc.taxes if t.account_head == shipping_rule.account), 0.0)
+			)
+			# When a grand-total discount was already applied, grand_total_for_distributing_discount
+			# was captured before shipping was added. Adjust it so the subsequent _calculate()
+			# does not subtract the shipping from the grand total a second time.
+			if (
+				self.discount_amount_applied
+				and self.doc.apply_discount_on == "Grand Total"
+				and hasattr(self, "grand_total_for_distributing_discount")
+			):
+				self.grand_total_for_distributing_discount += new_shipping - prev_shipping
 
 			self._calculate()
 

@@ -1524,6 +1524,13 @@ erpnext.TransactionController = class TransactionController extends erpnext.taxe
 					doc: this.frm.doc,
 					method: "apply_shipping_rule",
 					callback: function (r) {
+						// grand_total_for_distributing_discount was captured before the server
+						// applied shipping. Recalculate it from server values so the subsequent
+						// _calculate_taxes_and_totals() does not subtract shipping twice.
+						if (me.discount_amount_applied && me.frm.doc.apply_discount_on == "Grand Total") {
+							me.grand_total_for_distributing_discount =
+								flt(me.frm.doc.grand_total) + flt(me.frm.doc.discount_amount);
+						}
 						me._calculate_taxes_and_totals();
 					},
 				})
