@@ -25,42 +25,134 @@ import frappe
 from frappe.utils import cint, flt
 
 FLAG = "stock_fold_authoritative"
+COMPANIES_FLAG = "stock_fold_authoritative_companies"
+APPENDED = "appended"
+REFOLDED = "refolded"
+REFOLD_CAP = 20000
 
 
-def try_fold(args: dict, allow_negative_stock: bool = False) -> bool:
-	"""Value this SLE by folding its event. Returns False to fall back to legacy."""
-	if not (frappe.conf.get(FLAG) and frappe.conf.get("stock_event_dual_write")):
-		return False
+def try_fold(args: dict, allow_negative_stock: bool = False) -> str | None:
+	"""Value this SLE by folding its event.
 
-	if args.get("serial_and_batch_bundle") or args.get("voucher_type") == "Stock Reconciliation":
-		return False
+	Returns APPENDED (event folded onto the checkpoint), REFOLDED (backdated —
+	the whole key was refolded and its projections rewritten), or None to fall
+	back to the legacy engine.
+	"""
+	if not _applies(args):
+		return None
 
 	from erpnext.stock.services import stock_engine_bridge
 
 	engine = stock_engine_bridge.engine()
 	policy = stock_engine_bridge.policy_for(args.get("item_code"), engine)
 	if policy is None:
-		return False
+		return None
 
 	event_row = _event_row(args.get("name"))
-	if not event_row or _has_future_events(event_row):
-		return False
+	if not event_row:
+		return None
+
+	if _has_future_events(event_row):
+		return _refold(engine, policy, event_row, args, allow_negative_stock)
 
 	state, last_event = _load_state(engine, event_row)
 	if state is None:
-		return False
+		return None
 
 	event = stock_engine_bridge.to_event(engine, event_row)
 	if event.id <= last_event:
-		return False
+		return None
 
 	result = engine.replay([event], engine.FoldContext(policy=policy), start=state)
 	effect = result.effects[event.id]
 	_validate_negative(effect, args, allow_negative_stock)
 
-	_project(event_row, result.final, effect, policy, engine)
+	_project_sle(event_row.sle, result.final, effect, policy, engine)
+	_project_bin(event_row, result.final)
 	_save_state(engine, event_row, result.final)
-	return True
+	return APPENDED
+
+
+def _applies(args: dict) -> bool:
+	if not (frappe.conf.get(FLAG) and frappe.conf.get("stock_event_dual_write")):
+		return False
+
+	companies = frappe.conf.get(COMPANIES_FLAG)
+	if companies and args.get("company") not in companies:
+		return False
+
+	return not (args.get("serial_and_batch_bundle") or args.get("is_adjustment_entry"))
+
+
+def _refold(engine, policy, event_row: frappe._dict, args: dict, allow_negative_stock: bool) -> str | None:
+	"""Backdated insert: synchronously refold the whole key and rewrite the
+	projections of every row whose values changed."""
+	from erpnext.stock.services import stock_engine_bridge
+
+	key = {"item_code": event_row.item_code, "warehouse": event_row.warehouse}
+	if not _history_foldable(key):
+		return None
+
+	rows = frappe.get_all(
+		"Stock Event",
+		filters=key,
+		fields=[
+			"name",
+			"posting_datetime",
+			"kind",
+			"qty_change",
+			"declared_rate",
+			"assert_qty",
+			"assert_rate",
+			"reverses_event",
+			"sle",
+		],
+		order_by="posting_datetime, name",
+	)
+
+	try:
+		events = [stock_engine_bridge.to_event(engine, row) for row in rows]
+	except ValueError:
+		return None
+
+	result = engine.replay(events, engine.FoldContext(policy=policy))
+	_validate_negative(result.effects[cint(event_row.name)], args, allow_negative_stock)
+
+	live = set(frappe.get_all("Stock Ledger Entry", filters={**key, "is_cancelled": 0}, pluck="name"))
+	for row in rows:
+		if row.sle not in live:
+			continue
+		effect = result.effects[cint(row.name)]
+		_project_sle(row.sle, result.states[cint(row.name)], effect, policy, engine)
+
+	_project_bin(event_row, result.final)
+	last_id = max(cint(row.name) for row in rows)
+	_save_state(engine, frappe._dict({**key, "name": last_id}), result.final)
+	return REFOLDED
+
+
+def _history_foldable(key: dict) -> bool:
+	"""Complete event history, aggregate-only, and small enough for a sync refold."""
+	events = frappe.db.count("Stock Event", key)
+	if events > REFOLD_CAP:
+		return False
+	if events < frappe.db.count("Stock Ledger Entry", {**key, "is_cancelled": 0}):
+		return False
+	return not _key_has_allocations(key)
+
+
+def _key_has_allocations(key: dict) -> bool:
+	event = frappe.qb.DocType("Stock Event")
+	allocation = frappe.qb.DocType("Stock Event Allocation")
+	rows = (
+		frappe.qb.from_(allocation)
+		.join(event)
+		.on(allocation.parent == event.name)
+		.select(allocation.name)
+		.where((event.item_code == key["item_code"]) & (event.warehouse == key["warehouse"]))
+		.limit(1)
+	).run()
+	return bool(rows)
 
 
 def invalidate(item_code: str, warehouse: str) -> None:
@@ -138,9 +230,7 @@ def _rebuild(engine, event_row: frappe._dict) -> tuple:
 	from erpnext.stock.services import stock_engine_bridge
 
 	key = {"item_code": event_row.item_code, "warehouse": event_row.warehouse}
-	live_sles = frappe.db.count("Stock Ledger Entry", {**key, "is_cancelled": 0})
-	events = frappe.db.count("Stock Event", key)
-	if events < live_sles:
+	if not _history_foldable(key):
 		return None, 0
 
 	rows = [
@@ -195,16 +285,15 @@ def _validate_negative(effect, args: dict, allow_negative_stock: bool) -> None:
 	)
 
 
-def _project(event_row: frappe._dict, state, effect, policy, engine) -> None:
-	"""Write the fold result into the legacy projections: SLE fields and Bin."""
-	from erpnext.stock.services import bin_writer, stock_ledger_writer
-	from erpnext.stock.utils import get_or_make_bin
+def _project_sle(sle_name: str, state, effect, policy, engine) -> None:
+	"""Write one event's fold result into the legacy SLE projection."""
+	from erpnext.stock.services import stock_ledger_writer
 
 	layered = isinstance(policy, engine.Fifo | engine.Lifo)
 	stock_queue = [[layer.qty, layer.rate] for layer in state.layers] if layered else []
 
 	stock_ledger_writer.set_fields(
-		event_row.sle,
+		sle_name,
 		{
 			"qty_after_transaction": effect.qty_after,
 			"valuation_rate": state.valuation_rate,
@@ -214,13 +303,18 @@ def _project(event_row: frappe._dict, state, effect, policy, engine) -> None:
 		},
 	)
 
+
+def _project_bin(event_row: frappe._dict, final_state) -> None:
+	from erpnext.stock.services import bin_writer
+	from erpnext.stock.utils import get_or_make_bin
+
 	bin_name = get_or_make_bin(event_row.item_code, event_row.warehouse)
 	bin_writer.set_fields(
 		bin_name,
 		{
-			"actual_qty": effect.qty_after,
-			"stock_value": effect.value_after,
-			"valuation_rate": state.valuation_rate,
+			"actual_qty": final_state.qty,
+			"stock_value": final_state.value,
+			"valuation_rate": final_state.valuation_rate,
 		},
 	)
 

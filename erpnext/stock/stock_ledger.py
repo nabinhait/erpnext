@@ -208,8 +208,17 @@ def repost_current_voucher(args, allow_negative_stock=False, via_landed_cost_vou
 		if not (args.get("is_cancelled") and via_landed_cost_voucher):
 			from erpnext.stock.services import stock_fold_authority
 
-			if not via_landed_cost_voucher and stock_fold_authority.try_fold(args, allow_negative_stock):
+			folded = None
+			if not via_landed_cost_voucher:
+				folded = stock_fold_authority.try_fold(args, allow_negative_stock)
+
+			if folded == stock_fold_authority.APPENDED:
 				update_qty_in_future_sle(args, allow_negative_stock)
+				return
+			if folded == stock_fold_authority.REFOLDED:
+				# the refold already rewrote future rows; only the validation remains
+				args["posting_datetime"] = get_combine_datetime(args["posting_date"], args["posting_time"])
+				validate_negative_qty_in_future_sle(args, allow_negative_stock)
 				return
 
 			# Reposts only current voucher SL Entries

@@ -4,9 +4,13 @@
 import json
 
 import frappe
+from frappe.utils import add_days, today
 
 from erpnext.stock.doctype.item.test_item import make_item
 from erpnext.stock.doctype.stock_entry.stock_entry_utils import make_stock_entry
+from erpnext.stock.doctype.stock_reconciliation.test_stock_reconciliation import (
+	create_stock_reconciliation,
+)
 from erpnext.stock.doctype.warehouse.test_warehouse import create_warehouse
 from erpnext.tests.utils import ERPNextTestSuite
 
@@ -52,6 +56,83 @@ class TestStockFoldAuthority(ERPNextTestSuite):
 		self.assertFalse(
 			frappe.db.exists("Stock Fold State", {"item_code": item, "warehouse": legacy_warehouse})
 		)
+
+	def test_fold_parity_including_reco_and_backdate(self):
+		"""Reconciliations fold as assertions; a mid-history backdate refolds the
+		key synchronously. Legacy needs its background repost processed to reach
+		the same values — the fold side must be right without one."""
+		item = make_item(properties={"is_stock_item": 1}).name
+		legacy_warehouse = create_warehouse("Fold BD Legacy WH")
+		fold_warehouse = create_warehouse("Fold BD Fold WH")
+
+		frappe.conf.stock_event_dual_write = 1
+		try:
+			self._run_backdate_scenario(item, legacy_warehouse)
+			self._process_pending_reposts()
+
+			frappe.conf.stock_fold_authoritative = 1
+			self._run_backdate_scenario(item, fold_warehouse)
+		finally:
+			frappe.conf.pop("stock_fold_authoritative", None)
+			frappe.conf.pop("stock_event_dual_write", None)
+
+		legacy_rows = self._valuation_rows(item, legacy_warehouse)
+		fold_rows = self._valuation_rows(item, fold_warehouse)
+		self.assertEqual(len(legacy_rows), len(fold_rows))
+
+		for legacy, fold in zip(legacy_rows, fold_rows, strict=True):
+			for field in ("actual_qty", "qty_after_transaction", "stock_value", "stock_value_difference"):
+				self.assertAlmostEqual(legacy[field], fold[field], places=4, msg=field)
+
+		legacy_bin = self._bin(item, legacy_warehouse)
+		fold_bin = self._bin(item, fold_warehouse)
+		self.assertAlmostEqual(legacy_bin.actual_qty, fold_bin.actual_qty, places=4)
+		self.assertAlmostEqual(legacy_bin.stock_value, fold_bin.stock_value, places=4)
+
+	def test_company_scoping(self):
+		"""With a company allow-list that excludes the transaction's company, the
+		fold path must stand aside entirely."""
+		item = make_item(properties={"is_stock_item": 1}).name
+		warehouse = create_warehouse("Fold Company Scope WH")
+
+		frappe.conf.stock_event_dual_write = 1
+		frappe.conf.stock_fold_authoritative = 1
+		frappe.conf.stock_fold_authoritative_companies = ["Some Other Company"]
+		try:
+			make_stock_entry(item_code=item, target=warehouse, qty=2, rate=50)
+		finally:
+			frappe.conf.pop("stock_fold_authoritative_companies", None)
+			frappe.conf.pop("stock_fold_authoritative", None)
+			frappe.conf.pop("stock_event_dual_write", None)
+
+		self.assertFalse(frappe.db.exists("Stock Fold State", {"item_code": item, "warehouse": warehouse}))
+
+	def _run_backdate_scenario(self, item: str, warehouse: str) -> None:
+		make_stock_entry(
+			item_code=item, target=warehouse, qty=10, rate=100, posting_date=add_days(today(), -5)
+		)
+		make_stock_entry(
+			item_code=item, target=warehouse, qty=5, rate=120, posting_date=add_days(today(), -3)
+		)
+		make_stock_entry(item_code=item, source=warehouse, qty=6, posting_date=add_days(today(), -2))
+		create_stock_reconciliation(
+			item_code=item, warehouse=warehouse, qty=12, rate=110, posting_date=add_days(today(), -1)
+		)
+		make_stock_entry(item_code=item, source=warehouse, qty=4)
+		# backdated between the first two receipts: refolds up to the reconciliation
+		make_stock_entry(item_code=item, target=warehouse, qty=3, rate=90, posting_date=add_days(today(), -4))
+		make_stock_entry(item_code=item, source=warehouse, qty=2)
+
+	def _process_pending_reposts(self) -> None:
+		from erpnext.stock.doctype.repost_item_valuation.repost_item_valuation import repost
+
+		pending = frappe.get_all(
+			"Repost Item Valuation",
+			filters={"docstatus": 1, "status": ("in", ["Queued", "In Progress"])},
+			pluck="name",
+		)
+		for name in pending:
+			repost(frappe.get_doc("Repost Item Valuation", name))
 
 	def _run_scenario(self, item: str, warehouse: str) -> None:
 		make_stock_entry(item_code=item, target=warehouse, qty=10, rate=100)
