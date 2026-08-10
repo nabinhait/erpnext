@@ -25,7 +25,7 @@ Requires the ``stock_engine`` app. Run from the bench console:
 import frappe
 from frappe.utils import cint, flt
 
-from erpnext.stock.utils import get_valuation_method
+from erpnext.stock.services import stock_engine_bridge
 
 QTY_TOLERANCE = 1e-6
 VALUE_TOLERANCE = 0.05
@@ -37,7 +37,7 @@ def run(
 	qty_tolerance: float = QTY_TOLERANCE,
 	value_tolerance: float = VALUE_TOLERANCE,
 ) -> dict:
-	engine = _engine()
+	engine = stock_engine_bridge.engine()
 	report = {
 		"keys": 0,
 		"events": 0,
@@ -51,7 +51,7 @@ def run(
 	}
 
 	for item_code, warehouse in _keys(warehouses):
-		policy = _policy(engine, item_code)
+		policy = stock_engine_bridge.policy_for(item_code, engine)
 		if policy is None:
 			report["skipped_standard_cost"].append((item_code, warehouse))
 			continue
@@ -64,7 +64,7 @@ def run(
 			report["class_a_keys"].append((item_code, warehouse))
 
 		try:
-			events = [_to_engine_event(engine, row) for row in rows]
+			events = [stock_engine_bridge.to_event(engine, row) for row in rows]
 		except ValueError as error:
 			report["conversion_errors"].append((item_code, warehouse, str(error)))
 			continue
@@ -117,26 +117,6 @@ def run(
 	return report
 
 
-def _engine():
-	try:
-		from stock_engine.core.context import FoldContext
-		from stock_engine.core.event import Event, EventKind
-		from stock_engine.core.policies import Fifo, Lifo, MovingAverage
-		from stock_engine.core.replay import replay
-	except ImportError:
-		frappe.throw("Shadow mode requires the stock_engine app to be installed on this bench")
-
-	return frappe._dict(
-		Event=Event,
-		EventKind=EventKind,
-		FoldContext=FoldContext,
-		Fifo=Fifo,
-		Lifo=Lifo,
-		MovingAverage=MovingAverage,
-		replay=replay,
-	)
-
-
 def _keys(warehouses: list[str] | None) -> list[tuple[str, str]]:
 	filters = {"warehouse": ("in", warehouses)} if warehouses else {}
 	rows = frappe.get_all(
@@ -147,17 +127,6 @@ def _keys(warehouses: list[str] | None) -> list[tuple[str, str]]:
 		order_by="item_code, warehouse",
 	)
 	return [(row.item_code, row.warehouse) for row in rows]
-
-
-def _policy(engine, item_code: str):
-	method = get_valuation_method(item_code)
-	if method == "Standard Cost":
-		return None  # fixed-rate semantics diverge by design; classified in M4's compat work
-	if method == "LIFO":
-		return engine.Lifo()
-	if method == "Moving Average":
-		return engine.MovingAverage()
-	return engine.Fifo()
 
 
 def _event_rows(item_code: str, warehouse: str) -> list[frappe._dict]:
@@ -214,22 +183,3 @@ def _legacy_inconsistent(rows, legacy: dict, qty_tolerance: float) -> bool:
 		if abs(running - flt(stored.qty_after_transaction)) > qty_tolerance * 1000:
 			return True
 	return False
-
-
-def _to_engine_event(engine, row: frappe._dict):
-	kind = engine.EventKind(row.kind)
-
-	if row.kind == "Reversal" and not row.reverses_event:
-		# best-effort pairing failed; fold it as the movement it is
-		kind = engine.EventKind.RECEIPT if flt(row.qty_change) > 0 else engine.EventKind.ISSUE
-
-	return engine.Event(
-		id=cint(row.name),
-		posting_datetime=row.posting_datetime,
-		kind=kind,
-		qty_change=flt(row.qty_change),
-		declared_rate=flt(row.declared_rate) if flt(row.qty_change) > 0 else None,
-		assert_qty=flt(row.assert_qty) if row.kind == "Assertion" else None,
-		assert_rate=flt(row.assert_rate) if row.kind == "Assertion" else None,
-		reverses_event=cint(row.reverses_event) or None,
-	)

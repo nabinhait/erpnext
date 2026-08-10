@@ -1,0 +1,62 @@
+{
+ "actions": [],
+ "creation": "2026-08-10 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "item_code",
+  "warehouse",
+  "last_event",
+  "state_json"
+ ],
+ "fields": [
+  {
+   "fieldname": "item_code",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Item Code",
+   "options": "Item",
+   "reqd": 1
+  },
+  {
+   "fieldname": "warehouse",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Warehouse",
+   "options": "Warehouse",
+   "reqd": 1
+  },
+  {
+   "fieldname": "last_event",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Last Event"
+  },
+  {
+   "fieldname": "state_json",
+   "fieldtype": "Long Text",
+   "label": "State JSON"
+  }
+ ],
+ "in_create": 1,
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-08-10 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Stock",
+ "name": "Stock Fold State",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "role": "Stock Manager"
+  },
+  {
+   "read": 1,
+   "role": "System Manager"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

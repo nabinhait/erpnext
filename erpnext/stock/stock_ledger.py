@@ -206,6 +206,12 @@ def repost_current_voucher(args, allow_negative_stock=False, via_landed_cost_vou
 			args["posting_date"] = nowdate()
 
 		if not (args.get("is_cancelled") and via_landed_cost_voucher):
+			from erpnext.stock.services import stock_fold_authority
+
+			if not via_landed_cost_voucher and stock_fold_authority.try_fold(args, allow_negative_stock):
+				update_qty_in_future_sle(args, allow_negative_stock)
+				return
+
 			# Reposts only current voucher SL Entries
 			# Updates valuation rate, stock value, stock queue for current transaction
 			update_entries_after(

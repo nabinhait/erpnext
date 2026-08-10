@@ -75,9 +75,15 @@ def write_valuation(sle: dict) -> None:
 	"""Write back recomputed valuation fields during a repost.
 
 	Full-row UPDATE via ``db_update`` — deliberately no validation and no hooks,
-	matching how reposting has always written.
+	matching how reposting has always written. A legacy rewrite makes any fold
+	checkpoint for the key stale, so it is invalidated here.
 	"""
 	frappe.get_doc(sle).db_update()
+
+	if frappe.conf.get("stock_fold_authoritative"):
+		from erpnext.stock.services import stock_fold_authority
+
+		stock_fold_authority.invalidate(sle.get("item_code"), sle.get("warehouse"))
 
 
 @authorized_writer
