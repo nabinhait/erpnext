@@ -1590,6 +1590,31 @@ class TestStockLedgerEntry(ERPNextTestSuite, StockTestMixin):
 
 		self.assertFalse(frappe.db.exists("Stock Ledger Entry", {"voucher_no": voucher_no}))
 
+	def test_unrouted_stock_write_logging(self):
+		"""With log_unrouted_stock_writes on, a direct doc-API write to an SLE is
+		logged, while the same write through the writer module is not."""
+		from erpnext.stock.services import stock_ledger_writer
+
+		item = make_item(properties={"is_stock_item": 1})
+		se = make_stock_entry(item_code=item.name, target="_Test Warehouse - _TC", qty=1, rate=10)
+		sle_name = frappe.db.get_value("Stock Ledger Entry", {"voucher_no": se.name}, "name")
+		sle = frappe.get_doc("Stock Ledger Entry", sle_name)
+
+		def log_count():
+			return frappe.db.count("Error Log", {"method": ("like", "Unrouted write to Stock Ledger Entry%")})
+
+		frappe.conf.log_unrouted_stock_writes = 1
+		try:
+			baseline = log_count()
+
+			sle.db_set({"to_rename": sle.to_rename})
+			self.assertEqual(log_count(), baseline + 1)
+
+			stock_ledger_writer.set_fields(sle, {"to_rename": sle.to_rename})
+			self.assertEqual(log_count(), baseline + 1)
+		finally:
+			frappe.conf.pop("log_unrouted_stock_writes", None)
+
 
 def create_repack_entry(**args):
 	args = frappe._dict(args)

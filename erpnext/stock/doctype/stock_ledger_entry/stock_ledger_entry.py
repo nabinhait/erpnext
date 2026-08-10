@@ -17,7 +17,7 @@ from erpnext.controllers.item_variant import ItemTemplateCannotHaveStock
 from erpnext.stock.doctype.inventory_dimension.inventory_dimension import get_inventory_dimensions
 from erpnext.stock.doctype.serial_no.serial_no import get_serial_nos as get_parsed_serial_nos
 from erpnext.stock.serial_batch_bundle import SerialBatchBundle, get_serial_nos
-from erpnext.stock.services import stock_ledger_writer
+from erpnext.stock.services import stock_ledger_writer, stock_write_guard
 
 
 class StockFreezeError(frappe.ValidationError):
@@ -80,6 +80,18 @@ class StockLedgerEntry(Document):
 		voucher_type: DF.Link | None
 		warehouse: DF.Link | None
 	# end: auto-generated types
+
+	def db_insert(self, *args, **kwargs):
+		stock_write_guard.check("Stock Ledger Entry")
+		super().db_insert(*args, **kwargs)
+
+	def db_update(self, *args, **kwargs):
+		stock_write_guard.check("Stock Ledger Entry")
+		super().db_update(*args, **kwargs)
+
+	def db_set(self, *args, **kwargs):
+		stock_write_guard.check("Stock Ledger Entry")
+		return super().db_set(*args, **kwargs)
 
 	def autoname(self):
 		"""

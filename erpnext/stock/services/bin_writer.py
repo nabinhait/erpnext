@@ -12,10 +12,13 @@ from typing import TYPE_CHECKING
 
 import frappe
 
+from erpnext.stock.services.stock_write_guard import authorized_writer
+
 if TYPE_CHECKING:
 	from frappe.model.document import Document
 
 
+@authorized_writer
 def create(item_code: str, warehouse: str) -> "Document":
 	"""Create a Bin, tolerating a concurrent insert of the same key — the only insert path."""
 	savepoint = "create_bin"
@@ -31,6 +34,7 @@ def create(item_code: str, warehouse: str) -> "Document":
 	return bin_obj
 
 
+@authorized_writer
 def set_fields(bin_: "Document | str", values: dict, update_modified: bool = True) -> None:
 	"""Update fields on one Bin row; ``bin_`` is a Document or a name."""
 	if isinstance(bin_, str):
@@ -39,22 +43,26 @@ def set_fields(bin_: "Document | str", values: dict, update_modified: bool = Tru
 		bin_.db_set(values, update_modified=update_modified)
 
 
+@authorized_writer
 def update_document(bin_doc: "Document") -> None:
 	"""Write a loaded Bin document back as a full-row UPDATE (no hooks)."""
 	bin_doc.db_update()
 
 
+@authorized_writer
 def save(bin_doc: "Document") -> None:
 	"""Full document save with hooks — repair tooling (Recalculate Values)."""
 	bin_doc.save()
 
 
+@authorized_writer
 def set_stock_uom_for_item(item_code: str, stock_uom: str) -> None:
 	"""Sync every Bin of an item after its stock UOM changed (only legal with no ledger)."""
 	table = frappe.qb.DocType("Bin")
 	frappe.qb.update(table).set(table.stock_uom, stock_uom).where(table.item_code == item_code).run()
 
 
+@authorized_writer
 def delete(filters: dict) -> None:
 	"""Delete Bin rows (item/warehouse deletion, item merge, company wipe)."""
 	frappe.db.delete("Bin", filters)

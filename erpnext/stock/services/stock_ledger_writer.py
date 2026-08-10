@@ -14,10 +14,13 @@ from typing import TYPE_CHECKING
 import frappe
 from frappe.utils import now
 
+from erpnext.stock.services.stock_write_guard import authorized_writer
+
 if TYPE_CHECKING:
 	from frappe.model.document import Document
 
 
+@authorized_writer
 def submit_new(
 	args: dict, allow_negative_stock: bool = False, via_landed_cost_voucher: bool = False
 ) -> "Document":
@@ -38,6 +41,7 @@ def submit_new(
 	return sle
 
 
+@authorized_writer
 def insert_raw(args: dict) -> "Document":
 	"""Insert a draft SLE skipping validations and link checks.
 
@@ -52,6 +56,7 @@ def insert_raw(args: dict) -> "Document":
 	return sle
 
 
+@authorized_writer
 def set_fields(sle: "Document | str", values: dict, update_modified: bool = True) -> None:
 	"""Update fields on one SLE row; ``sle`` is a Document or a name."""
 	if isinstance(sle, str):
@@ -60,6 +65,7 @@ def set_fields(sle: "Document | str", values: dict, update_modified: bool = True
 		sle.db_set(values, update_modified=update_modified)
 
 
+@authorized_writer
 def write_valuation(sle: dict) -> None:
 	"""Write back recomputed valuation fields during a repost.
 
@@ -69,6 +75,7 @@ def write_valuation(sle: dict) -> None:
 	frappe.get_doc(sle).db_update()
 
 
+@authorized_writer
 def flag_voucher_cancelled(voucher_type: str, voucher_no: str) -> None:
 	"""Mark all live SLEs of a voucher cancelled.
 
@@ -85,6 +92,7 @@ def flag_voucher_cancelled(voucher_type: str, voucher_no: str) -> None:
 	).run()
 
 
+@authorized_writer
 def set_fields_for_voucher(
 	voucher_type: str, voucher_no: str, values: dict, except_warehouses: list[str] | None = None
 ) -> None:
@@ -98,6 +106,7 @@ def set_fields_for_voucher(
 	query.run()
 
 
+@authorized_writer
 def clear_bundle_links(bundle_names: list[str]) -> None:
 	"""Null the bundle link on cancelled SLEs referencing these bundles (POS merge delink)."""
 	sle = frappe.qb.DocType("Stock Ledger Entry")
@@ -108,6 +117,7 @@ def clear_bundle_links(bundle_names: list[str]) -> None:
 	).run()
 
 
+@authorized_writer
 def rename_row(oldname: str, newname: str) -> None:
 	"""Rename a temporarily named SLE row to its final series name (hourly rename job)."""
 	sle = frappe.qb.DocType("Stock Ledger Entry")
@@ -120,6 +130,7 @@ def rename_row(oldname: str, newname: str) -> None:
 	).run()
 
 
+@authorized_writer
 def delete_for_voucher(voucher_type: str, voucher_no: str) -> None:
 	"""Hard-delete a voucher's SLE rows.
 
@@ -132,11 +143,13 @@ def delete_for_voucher(voucher_type: str, voucher_no: str) -> None:
 	).run()
 
 
+@authorized_writer
 def delete_rows(names: list[str]) -> None:
 	"""Hard-delete SLE rows by name (per-company transaction deletion job)."""
 	frappe.db.delete("Stock Ledger Entry", {"name": ("in", names)})
 
 
+@authorized_writer
 def shift_future_qty(
 	args: dict, qty_shift: float, next_stock_reco_detail=None, standard_rate: float | None = None
 ) -> None:
