@@ -17,6 +17,7 @@ from erpnext.controllers.item_variant import ItemTemplateCannotHaveStock
 from erpnext.stock.doctype.inventory_dimension.inventory_dimension import get_inventory_dimensions
 from erpnext.stock.doctype.serial_no.serial_no import get_serial_nos as get_parsed_serial_nos
 from erpnext.stock.serial_batch_bundle import SerialBatchBundle, get_serial_nos
+from erpnext.stock.services import stock_ledger_writer
 
 
 class StockFreezeError(frappe.ValidationError):
@@ -307,7 +308,7 @@ class StockLedgerEntry(Document):
 			values_to_be_change["has_serial_no"] = item_detail.has_serial_no
 
 		if values_to_be_change:
-			self.db_set(values_to_be_change)
+			stock_ledger_writer.set_fields(self, values_to_be_change)
 
 		if not item_detail:
 			self.throw_error_message(f"Item {self.item_code} not found")
