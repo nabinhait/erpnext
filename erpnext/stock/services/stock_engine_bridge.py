@@ -62,6 +62,9 @@ def to_event(eng: frappe._dict, row: frappe._dict, allocations: list[frappe._dic
 		# best-effort pairing failed; fold it as the movement it is
 		kind = eng.EventKind.RECEIPT if flt(row.qty_change) > 0 else eng.EventKind.ISSUE
 
+	if kind is eng.EventKind.ASSERTION:
+		allocations = None  # engine assertions reset the whole key; lots reconverge from later facts
+
 	return eng.Event(
 		id=cint(row.name),
 		posting_datetime=row.posting_datetime,
