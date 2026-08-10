@@ -477,9 +477,10 @@ class AccountsController(TransactionBase):
 			frappe.qb.from_(gle).delete().where(
 				(gle.voucher_type == self.doctype) & (gle.voucher_no == self.name)
 			).run()
-			from erpnext.stock.services import stock_ledger_writer
+			from erpnext.stock.services import stock_event_emitter, stock_ledger_writer
 
 			stock_ledger_writer.delete_for_voucher(self.doctype, self.name)
+			stock_event_emitter.delete_for_voucher(self.doctype, self.name)
 
 			self._remove_advance_payment_ledger_entries()
 

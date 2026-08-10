@@ -1,0 +1,45 @@
+{
+ "actions": [],
+ "creation": "2026-08-10 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "serial_no",
+  "batch_no",
+  "qty_change"
+ ],
+ "fields": [
+  {
+   "fieldname": "serial_no",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Serial No",
+   "options": "Serial No"
+  },
+  {
+   "fieldname": "batch_no",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Batch No",
+   "options": "Batch"
+  },
+  {
+   "fieldname": "qty_change",
+   "fieldtype": "Float",
+   "in_list_view": 1,
+   "label": "Qty Change"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-08-10 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Stock",
+ "name": "Stock Event Allocation",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

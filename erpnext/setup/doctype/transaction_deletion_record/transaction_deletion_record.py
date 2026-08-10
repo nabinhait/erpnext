@@ -17,6 +17,7 @@ LEDGER_ENTRY_DOCTYPES = frozenset(
 		"GL Entry",
 		"Payment Ledger Entry",
 		"Stock Ledger Entry",
+		"Stock Event",
 	)
 )
 

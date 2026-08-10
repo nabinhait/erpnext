@@ -38,6 +38,11 @@ def submit_new(
 	if args.get("creation_time") and args.get("voucher_type") == "Stock Reconciliation":
 		set_fields(sle, {"creation": args.get("creation_time")})
 
+	if frappe.conf.get("stock_event_dual_write"):
+		from erpnext.stock.services import stock_event_emitter
+
+		stock_event_emitter.emit_for_sle(sle)
+
 	return sle
 
 

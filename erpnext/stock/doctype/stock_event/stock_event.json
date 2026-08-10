@@ -1,0 +1,160 @@
+{
+ "actions": [],
+ "autoname": "autoincrement",
+ "creation": "2026-08-10 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "item_code",
+  "warehouse",
+  "company",
+  "posting_datetime",
+  "kind",
+  "qty_change",
+  "declared_rate",
+  "assert_qty",
+  "assert_rate",
+  "reverses_event",
+  "voucher_type",
+  "voucher_no",
+  "voucher_detail_no",
+  "sle",
+  "source",
+  "content_hash",
+  "allocations"
+ ],
+ "fields": [
+  {
+   "fieldname": "item_code",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Item Code",
+   "options": "Item",
+   "reqd": 1
+  },
+  {
+   "fieldname": "warehouse",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Warehouse",
+   "options": "Warehouse",
+   "reqd": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company"
+  },
+  {
+   "fieldname": "posting_datetime",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Posting Datetime",
+   "reqd": 1
+  },
+  {
+   "fieldname": "kind",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Kind",
+   "options": "Receipt\nIssue\nAssertion\nReversal",
+   "reqd": 1
+  },
+  {
+   "fieldname": "qty_change",
+   "fieldtype": "Float",
+   "in_list_view": 1,
+   "label": "Qty Change"
+  },
+  {
+   "fieldname": "declared_rate",
+   "fieldtype": "Float",
+   "label": "Declared Rate"
+  },
+  {
+   "depends_on": "eval:doc.kind == 'Assertion'",
+   "fieldname": "assert_qty",
+   "fieldtype": "Float",
+   "label": "Assert Qty"
+  },
+  {
+   "depends_on": "eval:doc.kind == 'Assertion'",
+   "fieldname": "assert_rate",
+   "fieldtype": "Float",
+   "label": "Assert Rate"
+  },
+  {
+   "depends_on": "eval:doc.kind == 'Reversal'",
+   "fieldname": "reverses_event",
+   "fieldtype": "Int",
+   "label": "Reverses Event"
+  },
+  {
+   "fieldname": "voucher_type",
+   "fieldtype": "Link",
+   "label": "Voucher Type",
+   "options": "DocType"
+  },
+  {
+   "fieldname": "voucher_no",
+   "fieldtype": "Dynamic Link",
+   "label": "Voucher No",
+   "options": "voucher_type"
+  },
+  {
+   "fieldname": "voucher_detail_no",
+   "fieldtype": "Data",
+   "label": "Voucher Detail No"
+  },
+  {
+   "fieldname": "sle",
+   "fieldtype": "Link",
+   "label": "Stock Ledger Entry",
+   "options": "Stock Ledger Entry",
+   "unique": 1
+  },
+  {
+   "fieldname": "source",
+   "fieldtype": "Select",
+   "label": "Source",
+   "options": "Dual Write\nBackfill",
+   "read_only": 1
+  },
+  {
+   "fieldname": "content_hash",
+   "fieldtype": "Data",
+   "label": "Content Hash",
+   "length": 64,
+   "read_only": 1
+  },
+  {
+   "fieldname": "allocations",
+   "fieldtype": "Table",
+   "label": "Allocations",
+   "options": "Stock Event Allocation"
+  }
+ ],
+ "in_create": 1,
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-08-10 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Stock",
+ "name": "Stock Event",
+ "naming_rule": "Autoincrement",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "role": "Stock Manager"
+  },
+  {
+   "read": 1,
+   "role": "System Manager"
+  }
+ ],
+ "sort_field": "posting_datetime",
+ "sort_order": "DESC",
+ "states": []
+}
