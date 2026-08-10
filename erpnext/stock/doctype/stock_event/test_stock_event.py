@@ -10,7 +10,7 @@ from erpnext.stock.doctype.stock_reconciliation.test_stock_reconciliation import
 	create_stock_reconciliation,
 )
 from erpnext.stock.doctype.warehouse.test_warehouse import create_warehouse
-from erpnext.stock.services import stock_event_backfill, stock_event_emitter
+from erpnext.stock.services import stock_event_backfill, stock_event_emitter, stock_shadow
 from erpnext.tests.utils import ERPNextTestSuite
 
 WAREHOUSE = "_Test Warehouse - _TC"
@@ -88,3 +88,8 @@ class TestStockEvent(ERPNextTestSuite):
 		rerun = stock_event_backfill.run(warehouses=[warehouse])
 		self.assertEqual(rerun["created"], 0)
 		self.assertEqual(rerun["skipped"], live_rows)
+
+		shadow = stock_shadow.run(warehouses=[warehouse])
+		self.assertTrue(shadow["ok"], msg=str(shadow))
+		self.assertEqual(shadow["matched"], live_rows)
+		self.assertFalse(shadow["class_a_keys"])
