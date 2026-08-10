@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import frappe
 from frappe.core.doctype.user_permission.test_user_permission import create_user
-from frappe.utils import add_days, today
+from frappe.utils import add_days, add_months, get_first_day, get_last_day, nowdate, today
 
 from erpnext.stock.doctype.item.test_item import make_item
 from erpnext.stock.doctype.stock_closing_entry.stock_closing_entry import StockClosing
@@ -130,3 +130,47 @@ class TestStockClosingEntryDuplicate(ERPNextTestSuite):
 		later = self.make_closing("2026-04-01", "2026-06-30")
 		later.insert()  # would raise if validate_duplicate wrongly flagged it as overlapping
 		self.assertTrue(frappe.db.exists("Stock Closing Entry", later.name))
+
+
+class TestScheduledStockClosingEntry(ERPNextTestSuite):
+	def test_monthly_auto_creation(self):
+		"""The monthly job creates one submitted entry per company for the previous
+		month, only when opted in, and never a duplicate."""
+		from erpnext.stock.doctype.stock_closing_entry.stock_closing_entry import (
+			create_monthly_stock_closing_entries,
+		)
+
+		from_date = get_first_day(add_months(nowdate(), -1))
+		filters = {
+			"docstatus": 1,
+			"company": COMPANY,
+			"from_date": ("<=", get_last_day(from_date)),
+			"to_date": (">=", from_date),
+		}
+
+		def run_job():
+			with patch("erpnext.stock.doctype.stock_closing_entry.stock_closing_entry.enqueue"):
+				create_monthly_stock_closing_entries()
+
+		make_stock_entry(
+			item_code=make_item(properties={"is_stock_item": 1}).name,
+			to_warehouse=WAREHOUSE,
+			qty=1,
+			rate=10,
+			company=COMPANY,
+		)
+
+		baseline = frappe.db.count("Stock Closing Entry", filters)
+		try:
+			frappe.db.set_single_value("Stock Settings", "auto_create_stock_closing_entry", 0)
+			run_job()
+			self.assertEqual(frappe.db.count("Stock Closing Entry", filters), baseline)
+
+			frappe.db.set_single_value("Stock Settings", "auto_create_stock_closing_entry", 1)
+			expected = baseline or 1
+			run_job()
+			self.assertEqual(frappe.db.count("Stock Closing Entry", filters), expected)
+			run_job()
+			self.assertEqual(frappe.db.count("Stock Closing Entry", filters), expected)
+		finally:
+			frappe.db.set_single_value("Stock Settings", "auto_create_stock_closing_entry", 0)
