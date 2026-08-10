@@ -32,6 +32,7 @@ from erpnext.controllers.item_variant import (
 )
 from erpnext.stock.doctype.item_default.item_default import ItemDefault
 from erpnext.stock.serial_batch_bundle import SerialBatchCreation
+from erpnext.stock.services import bin_writer
 from erpnext.stock.utils import get_valuation_method
 
 
@@ -631,7 +632,7 @@ class Item(Document):
 		).run()
 
 	def on_trash(self):
-		frappe.db.delete("Bin", {"item_code": self.name})
+		bin_writer.delete({"item_code": self.name})
 		frappe.db.delete("Item Price", {"item_code": self.name})
 		for variant_of in frappe.get_all("Item", filters={"variant_of": self.name}):
 			frappe.delete_doc("Item", variant_of.name)
@@ -661,7 +662,7 @@ class Item(Document):
 			self.recalculate_bin_qty(new_name)
 
 	def delete_old_bins(self, old_name):
-		frappe.db.delete("Bin", {"item_code": old_name})
+		bin_writer.delete({"item_code": old_name})
 
 	def validate_duplicate_item_in_stock_reconciliation(self, old_name, new_name):
 		sri = frappe.qb.DocType("Stock Reconciliation Item")
@@ -740,7 +741,7 @@ class Item(Document):
 		)
 
 		# Delete all existing bins to avoid duplicate bins for the same item and warehouse
-		frappe.db.delete("Bin", {"item_code": new_name})
+		bin_writer.delete({"item_code": new_name})
 
 		for warehouse in repost_stock_for_warehouses:
 			repost_stock(new_name, warehouse)
@@ -1447,8 +1448,7 @@ def check_stock_uom_with_bin(item, stock_uom):
 		)
 
 	# No SLE or documents against item. Bin UOM can be changed safely.
-	bin_dt = frappe.qb.DocType("Bin")
-	frappe.qb.update(bin_dt).set(bin_dt.stock_uom, stock_uom).where(bin_dt.item_code == item).run()
+	bin_writer.set_stock_uom_for_item(item, stock_uom)
 
 
 def get_item_defaults(item_code, company):

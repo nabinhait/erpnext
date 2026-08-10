@@ -287,8 +287,10 @@ def update_bin_qty(item_code, warehouse, qty_dict=None):
 
 	bin.modified = now()
 	if mismatch:
+		from erpnext.stock.services import bin_writer
+
 		bin.set_projected_qty()
-		bin.db_update()
+		bin_writer.update_document(bin)
 		bin.clear_cache()
 
 

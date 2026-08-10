@@ -252,18 +252,9 @@ def get_or_make_bin(item_code: str, warehouse: str) -> str:
 
 def _create_bin(item_code, warehouse):
 	"""Create a bin and take care of concurrent inserts."""
+	from erpnext.stock.services import bin_writer
 
-	bin_creation_savepoint = "create_bin"
-	try:
-		frappe.db.savepoint(bin_creation_savepoint)
-		bin_obj = frappe.get_doc(doctype="Bin", item_code=item_code, warehouse=warehouse)
-		bin_obj.flags.ignore_permissions = 1
-		bin_obj.insert()
-	except frappe.UniqueValidationError:
-		frappe.db.rollback(save_point=bin_creation_savepoint)  # preserve transaction in postgres
-		bin_obj = frappe.get_last_doc("Bin", {"item_code": item_code, "warehouse": warehouse})
-
-	return bin_obj
+	return bin_writer.create(item_code, warehouse)
 
 
 @frappe.whitelist()

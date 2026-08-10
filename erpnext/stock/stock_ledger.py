@@ -35,7 +35,7 @@ from erpnext.stock.doctype.stock_reservation_entry.stock_reservation_entry impor
 	get_sre_reserved_batch_nos_details,
 	get_sre_reserved_serial_nos_details,
 )
-from erpnext.stock.services import stock_ledger_writer
+from erpnext.stock.services import bin_writer, stock_ledger_writer
 from erpnext.stock.utils import (
 	get_combine_datetime,
 	get_incoming_outgoing_rate_for_cancel,
@@ -1922,7 +1922,7 @@ class update_entries_after:
 			if data.valuation_rate is not None:
 				updated_values["valuation_rate"] = flt(data.valuation_rate)
 
-			frappe.db.set_value("Bin", bin_name, updated_values, update_modified=True)
+			bin_writer.set_fields(bin_name, updated_values)
 
 		self.reset_bin_without_stock_ledger_entries()
 

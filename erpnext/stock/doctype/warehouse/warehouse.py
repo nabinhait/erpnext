@@ -123,7 +123,9 @@ class Warehouse(NestedSet):
 		if self.check_if_child_exists():
 			throw(_("Child warehouse exists for this warehouse. You can not delete this warehouse."))
 
-		frappe.db.delete("Bin", filters={"warehouse": self.name})
+		from erpnext.stock.services import bin_writer
+
+		bin_writer.delete({"warehouse": self.name})
 		self.update_nsm_model()
 		self.unlink_from_items()
 

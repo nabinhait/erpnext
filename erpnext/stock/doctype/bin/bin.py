@@ -8,6 +8,8 @@ from frappe.query_builder import Case, Order
 from frappe.query_builder.functions import Coalesce, Sum
 from frappe.utils import flt
 
+from erpnext.stock.services import bin_writer
+
 
 class Bin(Document):
 	# begin: auto-generated types
@@ -68,7 +70,7 @@ class Bin(Document):
 		self.update_reserved_qty_for_sub_contracting(update_qty=False)
 		self.update_reserved_qty_for_production_plan(skip_project_qty_update=True, update_qty=False)
 		self.set_projected_qty()
-		self.save()
+		bin_writer.save(self)
 
 	def before_save(self):
 		if self.get("__islocal") or not self.stock_uom:
@@ -104,15 +106,13 @@ class Bin(Document):
 		self.reserved_qty_for_production_plan = flt(reserved_qty_for_production_plan)
 
 		if update_qty:
-			self.db_set(
-				"reserved_qty_for_production_plan",
-				flt(self.reserved_qty_for_production_plan),
-				update_modified=True,
+			bin_writer.set_fields(
+				self, {"reserved_qty_for_production_plan": flt(self.reserved_qty_for_production_plan)}
 			)
 
 		if not skip_project_qty_update:
 			self.set_projected_qty()
-			self.db_set("projected_qty", self.projected_qty, update_modified=True)
+			bin_writer.set_fields(self, {"projected_qty": self.projected_qty})
 
 	def update_reserved_qty_for_for_sub_assembly(self):
 		from erpnext.manufacturing.doctype.production_plan.production_plan import (
@@ -127,12 +127,12 @@ class Bin(Document):
 		self.reserved_qty_for_production_plan = flt(reserved_qty_for_production_plan)
 		self.set_projected_qty()
 
-		self.db_set(
+		bin_writer.set_fields(
+			self,
 			{
 				"projected_qty": self.projected_qty,
 				"reserved_qty_for_production_plan": flt(self.reserved_qty_for_production_plan),
 			},
-			update_modified=True,
 		)
 
 	def update_reserved_qty_for_production(self):
@@ -142,14 +142,12 @@ class Bin(Document):
 
 		self.reserved_qty_for_production = get_reserved_qty_for_production(self.item_code, self.warehouse)
 
-		self.db_set(
-			"reserved_qty_for_production", flt(self.reserved_qty_for_production), update_modified=True
-		)
+		bin_writer.set_fields(self, {"reserved_qty_for_production": flt(self.reserved_qty_for_production)})
 
 		self.update_reserved_qty_for_production_plan(skip_project_qty_update=True)
 
 		self.set_projected_qty()
-		self.db_set("projected_qty", self.projected_qty, update_modified=True)
+		bin_writer.set_fields(self, {"projected_qty": self.projected_qty})
 
 	def update_reserved_qty_for_sub_contracting(
 		self, subcontract_doctype="Subcontracting Order", update_qty=True
@@ -220,9 +218,9 @@ class Bin(Document):
 
 		self.reserved_qty_for_sub_contract = reserved_qty_for_sub_contract
 		if update_qty:
-			self.db_set("reserved_qty_for_sub_contract", reserved_qty_for_sub_contract, update_modified=True)
+			bin_writer.set_fields(self, {"reserved_qty_for_sub_contract": reserved_qty_for_sub_contract})
 			self.set_projected_qty()
-			self.db_set("projected_qty", self.projected_qty, update_modified=True)
+			bin_writer.set_fields(self, {"projected_qty": self.projected_qty})
 
 	def update_reserved_stock(self):
 		"""Update `Reserved Stock` on change in Reserved Qty of Stock Reservation Entry"""
@@ -233,7 +231,7 @@ class Bin(Document):
 
 		reserved_stock = get_sre_reserved_qty_for_item_and_warehouse(self.item_code, self.warehouse)
 
-		self.db_set("reserved_stock", flt(reserved_stock), update_modified=True)
+		bin_writer.set_fields(self, {"reserved_stock": flt(reserved_stock)})
 
 
 def on_doctype_update():
@@ -313,7 +311,7 @@ def update_qty_from_sle(bin_name, args):
 			get_item_standard_rate(args.get("item_code"), args.get("company"))
 		)
 
-	frappe.db.set_value("Bin", bin_name, bin_values, update_modified=True)
+	bin_writer.set_fields(bin_name, bin_values)
 
 
 def get_actual_qty(item_code, warehouse):
