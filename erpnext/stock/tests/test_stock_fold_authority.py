@@ -198,6 +198,27 @@ class TestStockFoldAuthority(ERPNextTestSuite):
 			for field in ("qty_after_transaction", "stock_value", "stock_value_difference"):
 				self.assertAlmostEqual(legacy[field], fold[field], places=4, msg=field)
 
+		# per-voucher dating: stock value and stock account balance agree on
+		# EVERY as-of date, not only at the end
+		self._assert_stock_account_sync(item, fold_warehouse, fold_vouchers)
+
+	def _assert_stock_account_sync(self, item: str, warehouse: str, vouchers: list[str]) -> None:
+		sles = frappe.get_all(
+			"Stock Ledger Entry",
+			filters={"item_code": item, "warehouse": warehouse, "is_cancelled": 0},
+			fields=["posting_date", "stock_value"],
+			order_by="posting_datetime, creation, name",
+		)
+		gl_rows = frappe.get_all(
+			"GL Entry",
+			filters={"voucher_no": ("in", vouchers), "account": warehouse, "is_cancelled": 0},
+			fields=["posting_date", "debit", "credit"],
+		)
+		for check_date in sorted({sle.posting_date for sle in sles}):
+			expected = [sle.stock_value for sle in sles if sle.posting_date <= check_date][-1]
+			balance = sum(row.debit - row.credit for row in gl_rows if row.posting_date <= check_date)
+			self.assertAlmostEqual(balance, expected, places=4, msg=str(check_date))
+
 	def test_lot_parity_with_legacy(self):
 		"""Batch-tracked flows fold per lot (moving average per batch) and must
 		match legacy batch-wise valuation on the hot path."""

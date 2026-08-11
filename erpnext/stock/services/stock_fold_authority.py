@@ -22,7 +22,7 @@ depends on the checkpoint: it is disposable tier-2 state.
 import json
 
 import frappe
-from frappe.utils import cint, flt, nowdate
+from frappe.utils import cint, flt
 
 FLAG = "stock_fold_authoritative"
 COMPANIES_FLAG = "stock_fold_authoritative_companies"
@@ -194,7 +194,7 @@ def _refold(engine, policy, event_row: frappe._dict, args: dict, allow_negative_
 		for sle in frappe.get_all(
 			"Stock Ledger Entry",
 			filters={**key, "is_cancelled": 0, "name": ("in", [row.sle for row in changed_rows if row.sle])},
-			fields=["name", "voucher_type", "voucher_no", "stock_value_difference"],
+			fields=["name", "voucher_type", "voucher_no", "posting_date", "stock_value_difference"],
 		)
 	}
 	for row in changed_rows:
@@ -221,9 +221,12 @@ def _post_gl_adjustment(args: dict, event_row: frappe._dict, rows: list, result,
 	"""Append-only GL: never rewrite affected vouchers' postings.
 
 	The net svd deltas the refold caused are posted as fresh GL rows on the
-	triggering (backdated) voucher, dated with it, netted per counter account.
-	Historical vouchers keep the GL they were reported with; the correction is
-	its own auditable posting."""
+	triggering voucher, netted per counter account and dated on the affected
+	voucher's own posting date — every correction takes effect exactly when
+	the movement it corrects took effect, so stock value and stock account
+	balance agree on every as-of date. Closings guarantee those dates lie in
+	the open period. Historical vouchers keep the GL rows they were reported
+	with; the correction is its own auditable posting."""
 	from erpnext.accounts.general_ledger import make_gl_entries
 	from erpnext.stock import get_warehouse_account_map
 
@@ -233,7 +236,7 @@ def _post_gl_adjustment(args: dict, event_row: frappe._dict, rows: list, result,
 		return  # no perpetual stock GL on this warehouse: nothing to correct
 
 	current = (args.get("voucher_type"), args.get("voucher_no"))
-	deltas: dict[str, float] = {}
+	deltas: dict[tuple[str, str], float] = {}
 	for row in rows:
 		stored = live.get(row.sle)
 		if stored is None or (stored.voucher_type, stored.voucher_no) == current:
@@ -245,12 +248,13 @@ def _post_gl_adjustment(args: dict, event_row: frappe._dict, rows: list, result,
 
 		counter = _counter_account(stored.voucher_type, stored.voucher_no, warehouse_account)
 		if counter:
-			deltas[counter] = deltas.get(counter, 0.0) + delta
+			key = (counter, str(stored.posting_date))
+			deltas[key] = deltas.get(key, 0.0) + delta
 
 	gl_map = []
-	for counter, delta in sorted(deltas.items()):
-		gl_map.append(_adjustment_row(args, warehouse_account, counter, debit=delta))
-		gl_map.append(_adjustment_row(args, counter, warehouse_account, debit=-delta))
+	for (counter, posting_date), delta in sorted(deltas.items()):
+		gl_map.append(_adjustment_row(args, warehouse_account, counter, delta, posting_date))
+		gl_map.append(_adjustment_row(args, counter, warehouse_account, -delta, posting_date))
 
 	if gl_map:
 		make_gl_entries(gl_map)
@@ -270,7 +274,7 @@ def _counter_account(voucher_type: str, voucher_no: str, warehouse_account: str)
 	return against.split(",")[0].strip() if against else None
 
 
-def _adjustment_row(args: dict, account: str, against: str, debit: float) -> frappe._dict:
+def _adjustment_row(args: dict, account: str, against: str, debit: float, posting_date: str) -> frappe._dict:
 	return frappe._dict(
 		{
 			"account": account,
@@ -282,9 +286,7 @@ def _adjustment_row(args: dict, account: str, against: str, debit: float) -> fra
 			"voucher_type": args.get("voucher_type"),
 			"voucher_no": args.get("voucher_no"),
 			"company": args.get("company"),
-			# the correction is a fact of now: it posts in the open period, never
-			# into the backdated (possibly closed) one
-			"posting_date": nowdate(),
+			"posting_date": posting_date,
 			"cost_center": frappe.get_cached_value("Company", args.get("company"), "cost_center"),
 			"remarks": "Stock value adjustment for backdated entry",
 			"is_opening": "No",
