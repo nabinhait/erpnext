@@ -22,7 +22,7 @@ depends on the checkpoint: it is disposable tier-2 state.
 import json
 
 import frappe
-from frappe.utils import cint, flt
+from frappe.utils import cint, flt, nowdate
 
 FLAG = "stock_fold_authoritative"
 COMPANIES_FLAG = "stock_fold_authoritative_companies"
@@ -282,7 +282,9 @@ def _adjustment_row(args: dict, account: str, against: str, debit: float) -> fra
 			"voucher_type": args.get("voucher_type"),
 			"voucher_no": args.get("voucher_no"),
 			"company": args.get("company"),
-			"posting_date": args.get("posting_date"),
+			# the correction is a fact of now: it posts in the open period, never
+			# into the backdated (possibly closed) one
+			"posting_date": nowdate(),
 			"cost_center": frappe.get_cached_value("Company", args.get("company"), "cost_center"),
 			"remarks": "Stock value adjustment for backdated entry",
 			"is_opening": "No",
