@@ -112,6 +112,45 @@ class TestStockFoldAuthority(ERPNextTestSuite):
 		self.assertAlmostEqual(legacy_bin.actual_qty, fold_bin.actual_qty, places=4)
 		self.assertAlmostEqual(legacy_bin.stock_value, fold_bin.stock_value, places=4)
 
+	def test_suppressed_legacy_repost(self):
+		"""With repost suppression on, a fold-covered backdate scenario creates no
+		Repost Item Valuation at all — values and GL are correct synchronously and
+		match a legacy run that needed its background reposts."""
+		company = "_Test Company with perpetual inventory"
+		item = make_item(properties={"is_stock_item": 1}).name
+		legacy_warehouse = create_warehouse("No Repost Legacy WH", company=company)
+		fold_warehouse = create_warehouse("No Repost Fold WH", company=company)
+
+		frappe.conf.stock_event_dual_write = 1
+		try:
+			legacy_vouchers = self._run_backdate_scenario(item, legacy_warehouse, company)
+			self._process_pending_reposts()
+
+			frappe.conf.stock_fold_authoritative = 1
+			frappe.conf.stock_fold_suppress_legacy_repost = 1
+			fold_vouchers = self._run_backdate_scenario(item, fold_warehouse, company)
+		finally:
+			frappe.conf.pop("stock_fold_suppress_legacy_repost", None)
+			frappe.conf.pop("stock_fold_authoritative", None)
+			frappe.conf.pop("stock_event_dual_write", None)
+
+		self.assertFalse(
+			frappe.get_all("Repost Item Valuation", filters={"voucher_no": ("in", fold_vouchers)})
+		)
+
+		for legacy_voucher, fold_voucher in zip(legacy_vouchers, fold_vouchers, strict=True):
+			self.assertEqual(
+				self._gl_totals(legacy_voucher, legacy_warehouse),
+				self._gl_totals(fold_voucher, fold_warehouse),
+				msg=fold_voucher,
+			)
+
+		legacy_rows = self._valuation_rows(item, legacy_warehouse)
+		fold_rows = self._valuation_rows(item, fold_warehouse)
+		for legacy, fold in zip(legacy_rows, fold_rows, strict=True):
+			for field in ("qty_after_transaction", "stock_value", "stock_value_difference"):
+				self.assertAlmostEqual(legacy[field], fold[field], places=4, msg=field)
+
 	def test_company_scoping(self):
 		"""With a company allow-list that excludes the transaction's company, the
 		fold path must stand aside entirely."""

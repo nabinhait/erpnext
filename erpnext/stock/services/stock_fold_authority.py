@@ -26,6 +26,7 @@ from frappe.utils import cint, flt
 
 FLAG = "stock_fold_authoritative"
 COMPANIES_FLAG = "stock_fold_authoritative_companies"
+SUPPRESS_FLAG = "stock_fold_suppress_legacy_repost"
 APPENDED = "appended"
 REFOLDED = "refolded"
 REFOLD_CAP = 20000
@@ -38,6 +39,35 @@ def try_fold(args: dict, allow_negative_stock: bool = False) -> str | None:
 	the whole key was refolded and its projections rewritten), or None to fall
 	back to the legacy engine.
 	"""
+	outcome = _try_fold(args, allow_negative_stock)
+	_record_outcome(args, outcome)
+	return outcome
+
+
+def should_skip_legacy_repost(doc) -> bool:
+	"""True when every SLE of this voucher was fold-valued and the site opted
+	out of the legacy background repost — nothing is left for it to do: values
+	were written synchronously and refolds regenerate affected GL inline."""
+	if not frappe.conf.get(SUPPRESS_FLAG):
+		return False
+
+	voucher = (doc.doctype, doc.name)
+	return voucher in _outcomes("folded") and voucher not in _outcomes("fallback")
+
+
+def _record_outcome(args: dict, outcome: str | None) -> None:
+	voucher = (args.get("voucher_type"), args.get("voucher_no"))
+	_outcomes("fallback" if outcome is None else "folded").add(voucher)
+
+
+def _outcomes(kind: str) -> set:
+	attr = f"stock_fold_{kind}_vouchers"
+	if not hasattr(frappe.local, attr):
+		setattr(frappe.local, attr, set())
+	return getattr(frappe.local, attr)
+
+
+def _try_fold(args: dict, allow_negative_stock: bool) -> str | None:
 	if not _applies(args):
 		return None
 
@@ -118,7 +148,14 @@ def _refold(engine, policy, event_row: frappe._dict, args: dict, allow_negative_
 	result = engine.replay(events, engine.FoldContext(policy=policy))
 	_validate_negative(result.effects[cint(event_row.name)], args, allow_negative_stock)
 
-	live = set(frappe.get_all("Stock Ledger Entry", filters={**key, "is_cancelled": 0}, pluck="name"))
+	live = {
+		sle.name: sle
+		for sle in frappe.get_all(
+			"Stock Ledger Entry",
+			filters={**key, "is_cancelled": 0},
+			fields=["name", "voucher_type", "voucher_no"],
+		)
+	}
 	for row in rows:
 		if row.sle not in live:
 			continue
@@ -128,7 +165,24 @@ def _refold(engine, policy, event_row: frappe._dict, args: dict, allow_negative_
 	_project_bin(event_row, result.final)
 	last_id = max(cint(row.name) for row in rows)
 	_save_state(engine, frappe._dict({**key, "name": last_id}), result.final)
+
+	if frappe.conf.get(SUPPRESS_FLAG):
+		_regenerate_gl(args, event_row, live.values())
+
 	return REFOLDED
+
+
+def _regenerate_gl(args: dict, event_row: frappe._dict, live_sles) -> None:
+	"""With the legacy repost suppressed, correct affected vouchers' GL inline.
+
+	Comparison-based regeneration: only vouchers whose GL no longer matches
+	their (refolded) svd get rewritten. The voucher being submitted is
+	excluded — its GL posts normally later in the same submit."""
+	from erpnext.accounts.utils import repost_gle_for_stock_vouchers
+
+	current = (args.get("voucher_type"), args.get("voucher_no"))
+	vouchers = sorted({(sle.voucher_type, sle.voucher_no) for sle in live_sles} - {current})
+	repost_gle_for_stock_vouchers(vouchers, str(event_row.posting_datetime)[:10], company=args.get("company"))
 
 
 def _history_foldable(key: dict) -> bool:

@@ -223,6 +223,10 @@ class StockLedgerService:
 			future_sle_exists,
 			repost_required_for_queue,
 		)
+		from erpnext.stock.services import stock_fold_authority
+
+		if not via_landed_cost_voucher and stock_fold_authority.should_skip_legacy_repost(self.doc):
+			return
 
 		args = frappe._dict(
 			{
