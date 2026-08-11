@@ -61,20 +61,43 @@ class TestStockFoldAuthority(ERPNextTestSuite):
 		"""Reconciliations fold as assertions; a mid-history backdate refolds the
 		key synchronously. Legacy needs its background repost processed to reach
 		the same values — the fold side must be right without one."""
+		company = "_Test Company with perpetual inventory"
 		item = make_item(properties={"is_stock_item": 1}).name
-		legacy_warehouse = create_warehouse("Fold BD Legacy WH")
-		fold_warehouse = create_warehouse("Fold BD Fold WH")
+		legacy_warehouse = create_warehouse("Fold BD Legacy WH", company=company)
+		fold_warehouse = create_warehouse("Fold BD Fold WH", company=company)
 
 		frappe.conf.stock_event_dual_write = 1
 		try:
-			self._run_backdate_scenario(item, legacy_warehouse)
+			legacy_vouchers = self._run_backdate_scenario(item, legacy_warehouse, company)
 			self._process_pending_reposts()
 
 			frappe.conf.stock_fold_authoritative = 1
-			self._run_backdate_scenario(item, fold_warehouse)
+			fold_vouchers = self._run_backdate_scenario(item, fold_warehouse, company)
+
+			# the backdated voucher's own GL is posted from fold-computed svd at
+			# submit — correct before any repost runs
+			backdated = fold_vouchers[-2]
+			svd = frappe.db.get_value(
+				"Stock Ledger Entry",
+				{"voucher_no": backdated, "is_cancelled": 0},
+				"stock_value_difference",
+			)
+			gl_debit = sum(row.debit for row in self._gl_rows(backdated))
+			self.assertAlmostEqual(gl_debit, svd, places=4)
+
+			# GL corrections for previously posted vouchers still ride the
+			# coexisting repost; process both sides, then GL must match exactly
+			self._process_pending_reposts()
 		finally:
 			frappe.conf.pop("stock_fold_authoritative", None)
 			frappe.conf.pop("stock_event_dual_write", None)
+
+		for legacy_voucher, fold_voucher in zip(legacy_vouchers, fold_vouchers, strict=True):
+			self.assertEqual(
+				self._gl_totals(legacy_voucher, legacy_warehouse),
+				self._gl_totals(fold_voucher, fold_warehouse),
+				msg=fold_voucher,
+			)
 
 		legacy_rows = self._valuation_rows(item, legacy_warehouse)
 		fold_rows = self._valuation_rows(item, fold_warehouse)
@@ -107,21 +130,65 @@ class TestStockFoldAuthority(ERPNextTestSuite):
 
 		self.assertFalse(frappe.db.exists("Stock Fold State", {"item_code": item, "warehouse": warehouse}))
 
-	def _run_backdate_scenario(self, item: str, warehouse: str) -> None:
-		make_stock_entry(
-			item_code=item, target=warehouse, qty=10, rate=100, posting_date=add_days(today(), -5)
+	def _run_backdate_scenario(self, item: str, warehouse: str, company: str) -> list[str]:
+		vouchers = [
+			make_stock_entry(
+				item_code=item,
+				target=warehouse,
+				qty=10,
+				rate=100,
+				posting_date=add_days(today(), -5),
+				company=company,
+			),
+			make_stock_entry(
+				item_code=item,
+				target=warehouse,
+				qty=5,
+				rate=120,
+				posting_date=add_days(today(), -3),
+				company=company,
+			),
+			make_stock_entry(
+				item_code=item, source=warehouse, qty=6, posting_date=add_days(today(), -2), company=company
+			),
+			create_stock_reconciliation(
+				item_code=item,
+				warehouse=warehouse,
+				qty=12,
+				rate=110,
+				posting_date=add_days(today(), -1),
+				company=company,
+			),
+			make_stock_entry(item_code=item, source=warehouse, qty=4, company=company),
+			# backdated between the first two receipts: refolds up to the reconciliation
+			make_stock_entry(
+				item_code=item,
+				target=warehouse,
+				qty=3,
+				rate=90,
+				posting_date=add_days(today(), -4),
+				company=company,
+			),
+			make_stock_entry(item_code=item, source=warehouse, qty=2, company=company),
+		]
+		return [voucher.name for voucher in vouchers]
+
+	def _gl_rows(self, voucher_no: str) -> list[frappe._dict]:
+		return frappe.get_all(
+			"GL Entry",
+			filters={"voucher_no": voucher_no, "is_cancelled": 0},
+			fields=["account", "debit", "credit"],
 		)
-		make_stock_entry(
-			item_code=item, target=warehouse, qty=5, rate=120, posting_date=add_days(today(), -3)
-		)
-		make_stock_entry(item_code=item, source=warehouse, qty=6, posting_date=add_days(today(), -2))
-		create_stock_reconciliation(
-			item_code=item, warehouse=warehouse, qty=12, rate=110, posting_date=add_days(today(), -1)
-		)
-		make_stock_entry(item_code=item, source=warehouse, qty=4)
-		# backdated between the first two receipts: refolds up to the reconciliation
-		make_stock_entry(item_code=item, target=warehouse, qty=3, rate=90, posting_date=add_days(today(), -4))
-		make_stock_entry(item_code=item, source=warehouse, qty=2)
+
+	def _gl_totals(self, voucher_no: str, warehouse: str) -> dict[str, tuple[float, float]]:
+		"""GL amounts per account, with the warehouse's own account normalized so
+		two warehouses' postings are comparable."""
+		totals: dict[str, tuple[float, float]] = {}
+		for row in self._gl_rows(voucher_no):
+			account = "WAREHOUSE" if row.account == warehouse else row.account
+			debit, credit = totals.get(account, (0.0, 0.0))
+			totals[account] = (round(debit + row.debit, 4), round(credit + row.credit, 4))
+		return totals
 
 	def _process_pending_reposts(self) -> None:
 		from erpnext.stock.doctype.repost_item_valuation.repost_item_valuation import repost
