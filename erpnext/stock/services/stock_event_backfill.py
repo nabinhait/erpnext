@@ -41,7 +41,8 @@ def run(warehouses: list[str] | None = None, batch_size: int = BATCH_SIZE) -> di
 			summary["created"] += created
 			warehouse_created += created
 			# each batch is durable so a killed run resumes where it stopped
-			frappe.db.commit()
+			if not frappe.in_test:
+				frappe.db.commit()
 
 		if warehouse_created:
 			print(f"[backfill] {warehouse}: +{warehouse_created} (total {summary['created']})", flush=True)
@@ -50,26 +51,41 @@ def run(warehouses: list[str] | None = None, batch_size: int = BATCH_SIZE) -> di
 
 
 def _insert_events(rows: list[frappe._dict]) -> int:
-	"""Insert events preserving legacy order.
+	"""Bulk-insert one batch of events (and their allocation children),
+	preserving legacy order via an explicitly reserved autoincrement block.
+	Live rows are never Reversals, so no pairing lookups are needed."""
+	if not rows:
+		return 0
 
-	Plain rows go through one bulk INSERT per batch (the doc API is far too
-	slow for production-scale history); bundle-carrying rows need allocation
-	children, so they use the emitter — flushing the bulk buffer first keeps
-	the auto-increment ids in legacy order."""
-	buffer: list[dict] = []
-	count = 0
-
+	bundle_entries = _bundle_entries([row.serial_and_batch_bundle for row in rows])
+	buffer = []
 	for row in rows:
-		if row.serial_and_batch_bundle:
-			count += _flush(buffer)
-			stock_event_emitter.emit_for_sle(row, source="Backfill")
-			count += 1
-		else:
-			args = stock_event_emitter.event_args_from_sle(row)
-			args["source"] = "Backfill"
-			buffer.append(args)
+		args = stock_event_emitter.event_args_from_sle(
+			row, allocations=bundle_entries.get(row.serial_and_batch_bundle, [])
+		)
+		args["source"] = "Backfill"
+		buffer.append(args)
 
-	return count + _flush(buffer)
+	return _flush(buffer)
+
+
+def _bundle_entries(bundles: list[str | None]) -> dict[str, list[dict]]:
+	names = [bundle for bundle in bundles if bundle]
+	if not names:
+		return {}
+
+	rows = frappe.get_all(
+		"Serial and Batch Entry",
+		filters={"parent": ("in", names)},
+		fields=["parent", "serial_no", "batch_no", "qty"],
+		order_by="parent, idx",
+	)
+	grouped: dict[str, list[dict]] = {}
+	for row in rows:
+		grouped.setdefault(row.parent, []).append(
+			{"serial_no": row.serial_no, "batch_no": row.batch_no, "qty_change": row.qty}
+		)
+	return grouped
 
 
 BULK_FIELDS = (
@@ -113,15 +129,52 @@ def _flush(buffer: list[dict]) -> int:
 		"owner": "Administrator",
 		"modified_by": "Administrator",
 	}
-	values = [
-		[({**args, **audit, "name": first + index}).get(field) for field in BULK_FIELDS]
-		for index, args in enumerate(buffer)
-	]
+	values = []
+	allocation_values = []
+	for index, args in enumerate(buffer):
+		event_id = first + index
+		values.append([({**args, **audit, "name": event_id}).get(field) for field in BULK_FIELDS])
+		for position, allocation in enumerate(args.get("allocations") or [], start=1):
+			allocation_values.append(
+				[
+					frappe.generate_hash(length=10),
+					str(event_id),
+					"Stock Event",
+					"allocations",
+					position,
+					allocation.get("serial_no"),
+					allocation.get("batch_no"),
+					allocation.get("qty_change"),
+					timestamp,
+					timestamp,
+					"Administrator",
+					"Administrator",
+				]
+			)
+
 	frappe.db.bulk_insert("Stock Event", BULK_FIELDS, values)
+	if allocation_values:
+		frappe.db.bulk_insert("Stock Event Allocation", ALLOCATION_FIELDS, allocation_values)
 
 	inserted = len(buffer)
 	buffer.clear()
 	return inserted
+
+
+ALLOCATION_FIELDS = (
+	"name",
+	"parent",
+	"parenttype",
+	"parentfield",
+	"idx",
+	"serial_no",
+	"batch_no",
+	"qty_change",
+	"creation",
+	"modified",
+	"owner",
+	"modified_by",
+)
 
 
 def verify(warehouses: list[str] | None = None, batch_size: int = BATCH_SIZE) -> dict:

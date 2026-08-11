@@ -51,8 +51,12 @@ def emit_for_sle(sle: "Document | dict", source: str = "Dual Write") -> "Documen
 	return event
 
 
-def event_args_from_sle(sle: "Document | dict") -> dict:
-	"""Map an SLE to fact fields — declared data only, no derived valuation."""
+def event_args_from_sle(sle: "Document | dict", allocations: list[dict] | None = None) -> dict:
+	"""Map an SLE to fact fields — declared data only, no derived valuation.
+
+	Pass ``allocations`` to skip the per-bundle lookup (bulk backfill
+	pre-fetches them); the content hash does not cover allocations, so the
+	result is identical either way."""
 	kind = _kind(sle)
 	args = {
 		"doctype": "Stock Event",
@@ -69,7 +73,7 @@ def event_args_from_sle(sle: "Document | dict") -> dict:
 		"voucher_no": sle.get("voucher_no"),
 		"voucher_detail_no": sle.get("voucher_detail_no"),
 		"sle": sle.get("name"),
-		"allocations": _allocations(sle),
+		"allocations": _allocations(sle) if allocations is None else allocations,
 	}
 	args["content_hash"] = content_hash(args)
 	return args
