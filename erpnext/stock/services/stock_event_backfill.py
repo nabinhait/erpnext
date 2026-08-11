@@ -22,11 +22,11 @@ BATCH_SIZE = 5000
 
 
 def run(warehouses: list[str] | None = None, batch_size: int = BATCH_SIZE) -> dict:
-	frappe.db.auto_commit_on_many_writes = 1
 	summary = {"created": 0, "skipped": 0}
 
 	for warehouse in warehouses or _all_warehouses():
 		cursor = None
+		warehouse_created = 0
 		while True:
 			rows = _next_batch(warehouse, cursor, batch_size)
 			if not rows:
@@ -34,17 +34,94 @@ def run(warehouses: list[str] | None = None, batch_size: int = BATCH_SIZE) -> di
 
 			cursor = (rows[-1].posting_datetime, rows[-1].creation, rows[-1].name)
 			existing = _existing_event_sles([row.name for row in rows])
+			pending = [row for row in rows if row.name not in existing]
 
-			for row in rows:
-				if row.name in existing:
-					summary["skipped"] += 1
-					continue
+			summary["skipped"] += len(rows) - len(pending)
+			created = _insert_events(pending)
+			summary["created"] += created
+			warehouse_created += created
+			# each batch is durable so a killed run resumes where it stopped
+			frappe.db.commit()
 
-				stock_event_emitter.emit_for_sle(row, source="Backfill")
-				summary["created"] += 1
+		if warehouse_created:
+			print(f"[backfill] {warehouse}: +{warehouse_created} (total {summary['created']})", flush=True)
 
-	frappe.db.auto_commit_on_many_writes = 0
 	return summary
+
+
+def _insert_events(rows: list[frappe._dict]) -> int:
+	"""Insert events preserving legacy order.
+
+	Plain rows go through one bulk INSERT per batch (the doc API is far too
+	slow for production-scale history); bundle-carrying rows need allocation
+	children, so they use the emitter — flushing the bulk buffer first keeps
+	the auto-increment ids in legacy order."""
+	buffer: list[dict] = []
+	count = 0
+
+	for row in rows:
+		if row.serial_and_batch_bundle:
+			count += _flush(buffer)
+			stock_event_emitter.emit_for_sle(row, source="Backfill")
+			count += 1
+		else:
+			args = stock_event_emitter.event_args_from_sle(row)
+			args["source"] = "Backfill"
+			buffer.append(args)
+
+	return count + _flush(buffer)
+
+
+BULK_FIELDS = (
+	"name",
+	"item_code",
+	"warehouse",
+	"company",
+	"posting_datetime",
+	"kind",
+	"qty_change",
+	"declared_rate",
+	"assert_qty",
+	"assert_rate",
+	"voucher_type",
+	"voucher_no",
+	"voucher_detail_no",
+	"sle",
+	"source",
+	"content_hash",
+	"creation",
+	"modified",
+	"owner",
+	"modified_by",
+)
+
+
+def _flush(buffer: list[dict]) -> int:
+	if not buffer:
+		return 0
+
+	# autoincrement names come from a DB sequence assigned in Python, so a bulk
+	# insert must reserve its block explicitly (backfill runs single-writer)
+	first = frappe.db.get_next_sequence_val("Stock Event")
+	if len(buffer) > 1:
+		frappe.db.set_next_sequence_val("Stock Event", first + len(buffer) - 1, is_val_used=True)
+
+	timestamp = frappe.utils.now()
+	audit = {
+		"creation": timestamp,
+		"modified": timestamp,
+		"owner": "Administrator",
+		"modified_by": "Administrator",
+	}
+	values = [
+		[({**args, **audit, "name": first + index}).get(field) for field in BULK_FIELDS]
+		for index, args in enumerate(buffer)
+	]
+	frappe.db.bulk_insert("Stock Event", BULK_FIELDS, values)
+
+	inserted = len(buffer)
+	buffer.clear()
+	return inserted
 
 
 def verify(warehouses: list[str] | None = None, batch_size: int = BATCH_SIZE) -> dict:
