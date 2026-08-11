@@ -27,6 +27,7 @@ from frappe.utils import cint, flt
 FLAG = "stock_fold_authoritative"
 COMPANIES_FLAG = "stock_fold_authoritative_companies"
 SUPPRESS_FLAG = "stock_fold_suppress_legacy_repost"
+GL_ADJUSTMENT_FLAG = "stock_fold_gl_adjustment"
 APPENDED = "appended"
 REFOLDED = "refolded"
 REFOLD_CAP = 20000
@@ -48,7 +49,7 @@ def should_skip_legacy_repost(doc) -> bool:
 	"""True when every SLE of this voucher was fold-valued and the site opted
 	out of the legacy background repost — nothing is left for it to do: values
 	were written synchronously and refolds regenerate affected GL inline."""
-	if not frappe.conf.get(SUPPRESS_FLAG):
+	if not (frappe.conf.get(SUPPRESS_FLAG) or frappe.conf.get(GL_ADJUSTMENT_FLAG)):
 		return False
 
 	voucher = (doc.doctype, doc.name)
@@ -74,7 +75,7 @@ def _try_fold(args: dict, allow_negative_stock: bool) -> str | None:
 	from erpnext.stock.services import stock_engine_bridge
 
 	engine = stock_engine_bridge.engine()
-	policy = stock_engine_bridge.policy_for(args.get("item_code"), engine)
+	policy = _policy_for(engine, args.get("item_code"))
 	if policy is None:
 		return None
 
@@ -89,7 +90,12 @@ def _try_fold(args: dict, allow_negative_stock: bool) -> str | None:
 	if state is None:
 		return None
 
-	event = stock_engine_bridge.to_event(engine, event_row)
+	allocations = _allocations([event_row.name]).get(str(event_row.name))
+	try:
+		event = stock_engine_bridge.to_event(engine, event_row, allocations)
+	except ValueError:
+		return None
+
 	if event.id <= last_event:
 		return None
 
@@ -111,7 +117,35 @@ def _applies(args: dict) -> bool:
 	if companies and args.get("company") not in companies:
 		return False
 
-	return not (args.get("serial_and_batch_bundle") or args.get("is_adjustment_entry"))
+	return not args.get("is_adjustment_entry")
+
+
+def _policy_for(engine, item_code: str):
+	"""Item's fold policy; lot-tracked items fold per lot at moving average —
+	the semantics of legacy batch-wise valuation and per-serial rates."""
+	from erpnext.stock.services import stock_engine_bridge
+
+	base = stock_engine_bridge.policy_for(item_code, engine)
+	if base is None:
+		return None
+
+	detail = frappe.get_cached_value("Item", item_code, ["has_batch_no", "has_serial_no"], as_dict=1)
+	if detail and (detail.has_batch_no or detail.has_serial_no):
+		return engine.MovingAverage()
+	return base
+
+
+def _allocations(event_names: list) -> dict[str, list[frappe._dict]]:
+	rows = frappe.get_all(
+		"Stock Event Allocation",
+		filters={"parent": ("in", [str(name) for name in event_names])},
+		fields=["parent", "serial_no", "batch_no", "qty_change"],
+		order_by="idx",
+	)
+	grouped: dict[str, list[frappe._dict]] = {}
+	for row in rows:
+		grouped.setdefault(str(row.parent), []).append(row)
+	return grouped
 
 
 def _refold(engine, policy, event_row: frappe._dict, args: dict, allow_negative_stock: bool) -> str | None:
@@ -120,7 +154,7 @@ def _refold(engine, policy, event_row: frappe._dict, args: dict, allow_negative_
 	from erpnext.stock.services import stock_engine_bridge
 
 	key = {"item_code": event_row.item_code, "warehouse": event_row.warehouse}
-	if not _history_foldable(key):
+	if not _history_foldable(key, allow_lots=False):
 		return None
 
 	rows = frappe.get_all(
@@ -140,6 +174,13 @@ def _refold(engine, policy, event_row: frappe._dict, args: dict, allow_negative_
 		order_by="posting_datetime, name",
 	)
 
+	window = _refold_window(rows, event_row)
+	is_tail = window[1] == len(rows)
+	rows = rows[window[0] : window[1]]
+	# a boundary assertion reconstructs the state but its own stored values are
+	# untouched by the backdate — never re-project it
+	changed_rows = rows[1:] if window[0] > 0 else rows
+
 	try:
 		events = [stock_engine_bridge.to_event(engine, row) for row in rows]
 	except ValueError:
@@ -152,24 +193,131 @@ def _refold(engine, policy, event_row: frappe._dict, args: dict, allow_negative_
 		sle.name: sle
 		for sle in frappe.get_all(
 			"Stock Ledger Entry",
-			filters={**key, "is_cancelled": 0},
-			fields=["name", "voucher_type", "voucher_no"],
+			filters={**key, "is_cancelled": 0, "name": ("in", [row.sle for row in changed_rows if row.sle])},
+			fields=["name", "voucher_type", "voucher_no", "stock_value_difference"],
 		)
 	}
-	for row in rows:
+	for row in changed_rows:
 		if row.sle not in live:
 			continue
 		effect = result.effects[cint(row.name)]
 		_project_sle(row.sle, result.states[cint(row.name)], effect, policy, engine)
 
-	_project_bin(event_row, result.final)
-	last_id = max(cint(row.name) for row in rows)
-	_save_state(engine, frappe._dict({**key, "name": last_id}), result.final)
+	if is_tail:
+		# the window reaches the present, so latest state and checkpoint move
+		_project_bin(event_row, result.final)
+		last_id = max(cint(row.name) for row in rows)
+		_save_state(engine, frappe._dict({**key, "name": last_id}), result.final)
 
-	if frappe.conf.get(SUPPRESS_FLAG):
+	if frappe.conf.get(GL_ADJUSTMENT_FLAG):
+		_post_gl_adjustment(args, event_row, changed_rows, result, live)
+	elif frappe.conf.get(SUPPRESS_FLAG):
 		_regenerate_gl(args, event_row, live.values())
 
 	return REFOLDED
+
+
+def _post_gl_adjustment(args: dict, event_row: frappe._dict, rows: list, result, live: dict) -> None:
+	"""Append-only GL: never rewrite affected vouchers' postings.
+
+	The net svd deltas the refold caused are posted as fresh GL rows on the
+	triggering (backdated) voucher, dated with it, netted per counter account.
+	Historical vouchers keep the GL they were reported with; the correction is
+	its own auditable posting."""
+	from erpnext.accounts.general_ledger import make_gl_entries
+	from erpnext.stock import get_warehouse_account_map
+
+	account_map = get_warehouse_account_map(args.get("company"))
+	warehouse_account = (account_map.get(event_row.warehouse) or {}).get("account")
+	if not warehouse_account:
+		return  # no perpetual stock GL on this warehouse: nothing to correct
+
+	current = (args.get("voucher_type"), args.get("voucher_no"))
+	deltas: dict[str, float] = {}
+	for row in rows:
+		stored = live.get(row.sle)
+		if stored is None or (stored.voucher_type, stored.voucher_no) == current:
+			continue
+
+		delta = flt(result.effects[cint(row.name)].value_delta) - flt(stored.stock_value_difference)
+		if abs(delta) < 0.005:
+			continue
+
+		counter = _counter_account(stored.voucher_type, stored.voucher_no, warehouse_account)
+		if counter:
+			deltas[counter] = deltas.get(counter, 0.0) + delta
+
+	gl_map = []
+	for counter, delta in sorted(deltas.items()):
+		gl_map.append(_adjustment_row(args, warehouse_account, counter, debit=delta))
+		gl_map.append(_adjustment_row(args, counter, warehouse_account, debit=-delta))
+
+	if gl_map:
+		make_gl_entries(gl_map)
+
+
+def _counter_account(voucher_type: str, voucher_no: str, warehouse_account: str) -> str | None:
+	against = frappe.db.get_value(
+		"GL Entry",
+		{
+			"voucher_type": voucher_type,
+			"voucher_no": voucher_no,
+			"account": warehouse_account,
+			"is_cancelled": 0,
+		},
+		"against",
+	)
+	return against.split(",")[0].strip() if against else None
+
+
+def _adjustment_row(args: dict, account: str, against: str, debit: float) -> frappe._dict:
+	return frappe._dict(
+		{
+			"account": account,
+			"against": against,
+			"debit": debit if debit > 0 else 0,
+			"credit": -debit if debit < 0 else 0,
+			"debit_in_account_currency": debit if debit > 0 else 0,
+			"credit_in_account_currency": -debit if debit < 0 else 0,
+			"voucher_type": args.get("voucher_type"),
+			"voucher_no": args.get("voucher_no"),
+			"company": args.get("company"),
+			"posting_date": args.get("posting_date"),
+			"cost_center": frappe.get_cached_value("Company", args.get("company"), "cost_center"),
+			"remarks": "Stock value adjustment for backdated entry",
+			"is_opening": "No",
+		}
+	)
+
+
+def _refold_window(rows: list, event_row: frappe._dict) -> tuple[int, int]:
+	"""The slice of history a backdate can actually change.
+
+	An assertion pins quantity and value, so the refold starts at the last
+	assertion at or before the inserted event (folded from empty, it
+	reconstructs the exact state) and stops after the first assertion beyond
+	it. A reversal referencing an event before the window forces a full
+	refold — its source layer lives outside the slice."""
+	inserted = next(index for index, row in enumerate(rows) if cint(row.name) == cint(event_row.name))
+
+	start = 0
+	for index in range(inserted, -1, -1):
+		if rows[index].kind == "Assertion":
+			start = index
+			break
+
+	end = len(rows)
+	for index in range(inserted + 1, len(rows)):
+		if rows[index].kind == "Assertion":
+			end = index + 1
+			break
+
+	window_start_id = cint(rows[start].name)
+	for row in rows[start:end]:
+		if row.kind == "Reversal" and row.reverses_event and cint(row.reverses_event) < window_start_id:
+			return (0, len(rows))
+
+	return (start, end)
 
 
 def _regenerate_gl(args: dict, event_row: frappe._dict, live_sles) -> None:
@@ -185,14 +333,20 @@ def _regenerate_gl(args: dict, event_row: frappe._dict, live_sles) -> None:
 	repost_gle_for_stock_vouchers(vouchers, str(event_row.posting_datetime)[:10], company=args.get("company"))
 
 
-def _history_foldable(key: dict) -> bool:
-	"""Complete event history, aggregate-only, and small enough for a sync refold."""
+def _history_foldable(key: dict, allow_lots: bool = False) -> bool:
+	"""Complete event history, small enough for a sync fold, and — when the key
+	is lot-tracked — free of assertions (assertions reset the aggregate but
+	cannot reconstruct lots, so lot keys with reconciliations stay legacy)."""
 	events = frappe.db.count("Stock Event", key)
 	if events > REFOLD_CAP:
 		return False
 	if events < frappe.db.count("Stock Ledger Entry", {**key, "is_cancelled": 0}):
 		return False
-	return not _key_has_allocations(key)
+	if not _key_has_allocations(key):
+		return True
+	if not allow_lots:
+		return False
+	return not frappe.db.exists("Stock Event", {**key, "kind": "Assertion"})
 
 
 def _key_has_allocations(key: dict) -> bool:
@@ -284,7 +438,7 @@ def _rebuild(engine, event_row: frappe._dict) -> tuple:
 	from erpnext.stock.services import stock_engine_bridge
 
 	key = {"item_code": event_row.item_code, "warehouse": event_row.warehouse}
-	if not _history_foldable(key):
+	if not _history_foldable(key, allow_lots=True):
 		return None, 0
 
 	rows = [
@@ -307,12 +461,15 @@ def _rebuild(engine, event_row: frappe._dict) -> tuple:
 		if cint(row.name) != cint(event_row.name)
 	]
 
+	allocations = _allocations([row.name for row in rows])
 	try:
-		events_list = [stock_engine_bridge.to_event(engine, row) for row in rows]
+		events_list = [
+			stock_engine_bridge.to_event(engine, row, allocations.get(str(row.name))) for row in rows
+		]
 	except ValueError:
 		return None, 0
 
-	policy = stock_engine_bridge.policy_for(event_row.item_code, engine)
+	policy = _policy_for(engine, event_row.item_code)
 	result = engine.replay(events_list, engine.FoldContext(policy=policy))
 	last = cint(rows[-1].name) if rows else 0
 	return result.final, last

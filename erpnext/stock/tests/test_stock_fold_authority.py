@@ -151,6 +151,115 @@ class TestStockFoldAuthority(ERPNextTestSuite):
 			for field in ("qty_after_transaction", "stock_value", "stock_value_difference"):
 				self.assertAlmostEqual(legacy[field], fold[field], places=4, msg=field)
 
+	def test_append_only_gl_adjustment(self):
+		"""With stock_fold_gl_adjustment, a backdate never rewrites posted GL: the
+		net delta posts as fresh rows on the backdated voucher, and total account
+		balances still equal a legacy run whose GL was rewritten by reposts."""
+		company = "_Test Company with perpetual inventory"
+		item = make_item(properties={"is_stock_item": 1}).name
+		legacy_warehouse = create_warehouse("GL Adj Legacy WH", company=company)
+		fold_warehouse = create_warehouse("GL Adj Fold WH", company=company)
+
+		frappe.conf.stock_event_dual_write = 1
+		try:
+			legacy_vouchers = self._run_backdate_scenario(item, legacy_warehouse, company)
+			self._process_pending_reposts()
+
+			frappe.conf.stock_fold_authoritative = 1
+			frappe.conf.stock_fold_gl_adjustment = 1
+			fold_vouchers = self._run_backdate_scenario(item, fold_warehouse, company)
+		finally:
+			frappe.conf.pop("stock_fold_gl_adjustment", None)
+			frappe.conf.pop("stock_fold_authoritative", None)
+			frappe.conf.pop("stock_event_dual_write", None)
+
+		# no legacy repost machinery engaged
+		self.assertFalse(
+			frappe.get_all("Repost Item Valuation", filters={"voucher_no": ("in", fold_vouchers)})
+		)
+
+		# the backdated voucher carries the adjustment rows
+		adjustment_rows = frappe.get_all(
+			"GL Entry",
+			filters={"voucher_no": fold_vouchers[-2], "remarks": ("like", "Stock value adjustment%")},
+		)
+		self.assertTrue(adjustment_rows)
+
+		# books net out identically even though no historical GL was rewritten
+		self.assertEqual(
+			self._account_balances(legacy_vouchers, legacy_warehouse),
+			self._account_balances(fold_vouchers, fold_warehouse),
+		)
+
+		# and the stock ledger itself still matches legacy exactly
+		legacy_rows = self._valuation_rows(item, legacy_warehouse)
+		fold_rows = self._valuation_rows(item, fold_warehouse)
+		for legacy, fold in zip(legacy_rows, fold_rows, strict=True):
+			for field in ("qty_after_transaction", "stock_value", "stock_value_difference"):
+				self.assertAlmostEqual(legacy[field], fold[field], places=4, msg=field)
+
+	def test_lot_parity_with_legacy(self):
+		"""Batch-tracked flows fold per lot (moving average per batch) and must
+		match legacy batch-wise valuation on the hot path."""
+		item = make_item(
+			properties={
+				"is_stock_item": 1,
+				"has_batch_no": 1,
+				"create_new_batch": 1,
+				"batch_number_series": "FOLDBAT-.#####",
+			}
+		).name
+		legacy_warehouse = create_warehouse("Lot Parity Legacy WH")
+		fold_warehouse = create_warehouse("Lot Parity Fold WH")
+
+		previous = frappe.db.get_single_value(
+			"Stock Settings", "auto_create_serial_and_batch_bundle_for_outward"
+		)
+		frappe.db.set_single_value("Stock Settings", "auto_create_serial_and_batch_bundle_for_outward", 1)
+		frappe.conf.stock_event_dual_write = 1
+		try:
+			self._run_lot_scenario(item, legacy_warehouse)
+
+			frappe.conf.stock_fold_authoritative = 1
+			self._run_lot_scenario(item, fold_warehouse)
+		finally:
+			frappe.conf.pop("stock_fold_authoritative", None)
+			frappe.conf.pop("stock_event_dual_write", None)
+			frappe.db.set_single_value(
+				"Stock Settings", "auto_create_serial_and_batch_bundle_for_outward", previous
+			)
+
+		legacy_rows = self._valuation_rows(item, legacy_warehouse)
+		fold_rows = self._valuation_rows(item, fold_warehouse)
+		self.assertEqual(len(legacy_rows), len(fold_rows))
+
+		for legacy, fold in zip(legacy_rows, fold_rows, strict=True):
+			for field in ("actual_qty", "qty_after_transaction", "stock_value", "stock_value_difference"):
+				self.assertAlmostEqual(legacy[field], fold[field], places=4, msg=field)
+
+		legacy_bin = self._bin(item, legacy_warehouse)
+		fold_bin = self._bin(item, fold_warehouse)
+		self.assertAlmostEqual(legacy_bin.actual_qty, fold_bin.actual_qty, places=4)
+		self.assertAlmostEqual(legacy_bin.stock_value, fold_bin.stock_value, places=4)
+
+		self.assertTrue(
+			frappe.db.exists("Stock Fold State", {"item_code": item, "warehouse": fold_warehouse})
+		)
+
+	def _run_lot_scenario(self, item: str, warehouse: str) -> None:
+		make_stock_entry(item_code=item, target=warehouse, qty=10, rate=100)
+		make_stock_entry(item_code=item, target=warehouse, qty=5, rate=120)
+		make_stock_entry(item_code=item, source=warehouse, qty=8)
+		make_stock_entry(item_code=item, target=warehouse, qty=4, rate=90)
+		make_stock_entry(item_code=item, source=warehouse, qty=3)
+
+	def _account_balances(self, vouchers: list[str], warehouse: str) -> dict[str, float]:
+		balances: dict[str, float] = {}
+		for voucher in vouchers:
+			for account, (debit, credit) in self._gl_totals(voucher, warehouse).items():
+				balances[account] = round(balances.get(account, 0.0) + debit - credit, 4)
+		return balances
+
 	def test_company_scoping(self):
 		"""With a company allow-list that excludes the transaction's company, the
 		fold path must stand aside entirely."""
