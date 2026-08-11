@@ -12,6 +12,10 @@ Entry. Mismatches are classified per the redesign doc:
   running-quantity invariant; disagreement there is expected, not a defect.
 - **(b) genuine mismatch** — the classes shadow mode exists to surface.
 - **(c) precision noise** — inside tolerance; counted, not reported.
+- **negative exposure** — rows where the balance is negative: legacy invents
+  a rate via its cascade and carries negative stock value; the engine holds
+  the uncovered quantity as exposure (§2.10). Reported separately because
+  replicate-vs-restate is a program decision, not a defect.
 
 Requires the ``stock_engine`` app. Run from the bench console:
 
@@ -41,6 +45,7 @@ def run(
 		"precision_noise": 0,
 		"class_a_keys": [],
 		"class_b": [],
+		"negative_exposure": [],
 		"skipped_standard_cost": [],
 		"conversion_errors": [],
 	}
@@ -73,15 +78,28 @@ def run(
 			if effect is None or stored is None:
 				continue
 
+			shadow_value = _legacy_equivalent_value(result.states[cint(row.name)])
 			qty_delta = abs(effect.qty_after - flt(stored.qty_after_transaction))
-			value_delta = abs(effect.value_after - flt(stored.stock_value))
+			value_delta = abs(shadow_value - flt(stored.stock_value))
 
+			state = result.states[cint(row.name)]
 			if qty_delta <= qty_tolerance and value_delta <= value_tolerance:
 				report["matched"] += 1
 			elif legacy_broken:
 				pass  # already accounted under class (a)
 			elif qty_delta <= qty_tolerance * 1000 and value_delta <= value_tolerance * 10:
 				report["precision_noise"] += 1
+			elif (effect.negative or state.exposure_qty) and qty_delta <= qty_tolerance:
+				if len(report["negative_exposure"]) < MAX_EXAMPLES:
+					report["negative_exposure"].append(
+						{
+							"sle": row.sle,
+							"item_code": item_code,
+							"warehouse": warehouse,
+							"legacy_value": flt(stored.stock_value),
+							"exposure_qty": state.exposure_qty,
+						}
+					)
 			elif len(report["class_b"]) < MAX_EXAMPLES:
 				report["class_b"].append(
 					{
@@ -91,7 +109,7 @@ def run(
 						"legacy_qty": flt(stored.qty_after_transaction),
 						"shadow_qty": effect.qty_after,
 						"legacy_value": flt(stored.stock_value),
-						"shadow_value": effect.value_after,
+						"shadow_value": shadow_value,
 					}
 				)
 
@@ -170,6 +188,16 @@ def _legacy_rows(sle_names: list[str]) -> dict[str, frappe._dict]:
 		fields=["name", "actual_qty", "qty_after_transaction", "stock_value", "voucher_type"],
 	)
 	return {row.name: row for row in rows}
+
+
+def _legacy_equivalent_value(state) -> float:
+	"""Project the engine state onto legacy value semantics.
+
+	The engine models a negative balance as exposure (provisional rate, value
+	held at zero until covered — §2.10); legacy carries it as negative stock
+	value. Legacy-equivalent value = value - exposure.
+	"""
+	return state.value - state.exposure_qty * state.exposure_rate
 
 
 def _legacy_inconsistent(rows, legacy: dict, qty_tolerance: float) -> bool:
