@@ -177,16 +177,28 @@ ALLOCATION_FIELDS = (
 )
 
 
-def verify(warehouses: list[str] | None = None, batch_size: int = BATCH_SIZE) -> dict:
+def verify(
+	warehouses: list[str] | None = None,
+	batch_size: int = BATCH_SIZE,
+	shard: int | None = None,
+	shards: int | None = None,
+) -> dict:
 	"""Check the backfill gate: legacy order reproduced exactly, hashes deterministic.
 
 	Walks each warehouse's live SLEs in legacy order alongside its events in
 	fact order ``(posting_datetime, id)`` per item, and recomputes every
-	event's content hash from the SLE row.
+	event's content hash from the SLE row. Pass ``shard``/``shards`` to
+	partition the warehouse list for parallel runs.
 	"""
 	report = {"checked": 0, "missing": [], "order_mismatches": [], "hash_mismatches": []}
 
-	for warehouse in warehouses or _all_warehouses():
+	targets = warehouses or _all_warehouses()
+	if shards:
+		targets = targets[shard::shards]
+
+	for index, warehouse in enumerate(targets):
+		if index and index % 500 == 0:
+			print(f"[verify] {index}/{len(targets)} warehouses, {report['checked']} rows", flush=True)
 		expected = {}
 		cursor = None
 		while True:
