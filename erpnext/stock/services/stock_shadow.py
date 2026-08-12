@@ -46,6 +46,8 @@ def run(
 		"matched": 0,
 		"precision_noise": 0,
 		"class_a_keys": [],
+		"batchwise_keys": [],
+		"batchwise_key_count": 0,
 		"class_b": [],
 		"negative_exposure": [],
 		"skipped_standard_cost": [],
@@ -88,6 +90,25 @@ def run(
 			continue
 
 		result = engine.replay(events, engine.FoldContext(policy=policy))
+
+		# mixed-era histories: keys reposted after the v15 migration were
+		# restated batch-wise by legacy itself. If aggregate folding leaves
+		# mismatches and the key carries lot facts, try per-lot — matching
+		# either of legacy's own semantics is a pass, recorded per key.
+		if allocations and _has_misfits(rows, result, legacy, qty_tolerance, value_tolerance):
+			try:
+				lot_events = [
+					stock_engine_bridge.to_event(engine, row, allocations.get(str(row.name)))
+					for row in rows
+				]
+				lot_result = engine.replay(lot_events, engine.FoldContext(policy=policy))
+				if not _has_misfits(rows, lot_result, legacy, qty_tolerance, value_tolerance):
+					result = lot_result
+					if len(report["batchwise_keys"]) < MAX_EXAMPLES:
+						report["batchwise_keys"].append((item_code, warehouse))
+					report["batchwise_key_count"] += 1
+			except ValueError:
+				pass
 
 		for row in rows:
 			report["events"] += 1
@@ -164,6 +185,20 @@ def _event_rows(item_code: str, warehouse: str) -> list[frappe._dict]:
 		],
 		order_by="posting_datetime, name",
 	)
+
+
+def _has_misfits(rows, result, legacy, qty_tolerance, value_tolerance) -> bool:
+	for row in rows:
+		effect = result.effects.get(cint(row.name))
+		stored = legacy.get(row.sle)
+		if effect is None or stored is None:
+			continue
+		state = result.states[cint(row.name)]
+		if abs(effect.qty_after - flt(stored.qty_after_transaction)) > qty_tolerance * 1000:
+			return True
+		if abs(_legacy_equivalent_value(state) - flt(stored.stock_value)) > value_tolerance * 10:
+			return True
+	return False
 
 
 def _allocations_by_event(event_names: list) -> dict[str, list[frappe._dict]]:
