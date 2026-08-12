@@ -90,7 +90,9 @@ def _try_fold(args: dict, allow_negative_stock: bool) -> str | None:
 	if state is None:
 		return None
 
-	allocations = _allocations([event_row.name]).get(str(event_row.name))
+	allocations = None
+	if args.get("serial_and_batch_bundle"):
+		allocations = _allocations([event_row.name]).get(str(event_row.name))
 	try:
 		event = stock_engine_bridge.to_event(engine, event_row, allocations)
 	except ValueError:
@@ -337,25 +339,32 @@ def _history_foldable(key: dict, allow_lots: bool = False) -> bool:
 		return False
 	if events < frappe.db.count("Stock Ledger Entry", {**key, "is_cancelled": 0}):
 		return False
-	if not _key_has_allocations(key):
+	if not _key_has_bundles(key):
 		return True
 	if not allow_lots:
 		return False
 	return not frappe.db.exists("Stock Event", {**key, "kind": "Assertion"})
 
 
-def _key_has_allocations(key: dict) -> bool:
-	event = frappe.qb.DocType("Stock Event")
-	allocation = frappe.qb.DocType("Stock Event Allocation")
-	rows = (
-		frappe.qb.from_(allocation)
-		.join(event)
-		.on(allocation.parent == event.name)
-		.select(allocation.name)
-		.where((event.item_code == key["item_code"]) & (event.warehouse == key["warehouse"]))
-		.limit(1)
-	).run()
-	return bool(rows)
+def _bundle_backed_sles(key: dict) -> set[str]:
+	return set(
+		frappe.get_all(
+			"Stock Ledger Entry",
+			filters={**key, "is_cancelled": 0, "serial_and_batch_bundle": ("is", "set")},
+			pluck="name",
+		)
+	)
+
+
+def _key_has_bundles(key: dict) -> bool:
+	"""Lots are folded as lots only where legacy's bundle engine valued them;
+	field-derived lot facts on pre-bundle rows were valued aggregate."""
+	return bool(
+		frappe.db.exists(
+			"Stock Ledger Entry",
+			{**key, "is_cancelled": 0, "serial_and_batch_bundle": ("is", "set")},
+		)
+	)
 
 
 def invalidate(item_code: str, warehouse: str) -> None:
@@ -450,16 +459,21 @@ def _rebuild(engine, event_row: frappe._dict) -> tuple:
 				"assert_qty",
 				"assert_rate",
 				"reverses_event",
+				"sle",
 			],
 			order_by="posting_datetime, name",
 		)
 		if cint(row.name) != cint(event_row.name)
 	]
 
+	bundle_rows = _bundle_backed_sles(key)
 	allocations = _allocations([row.name for row in rows])
 	try:
 		events_list = [
-			stock_engine_bridge.to_event(engine, row, allocations.get(str(row.name))) for row in rows
+			stock_engine_bridge.to_event(
+				engine, row, allocations.get(str(row.name)) if row.sle in bundle_rows else None
+			)
+			for row in rows
 		]
 	except ValueError:
 		return None, 0

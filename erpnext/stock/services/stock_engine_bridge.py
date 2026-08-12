@@ -43,19 +43,11 @@ def engine() -> frappe._dict:
 
 
 def policy_for(item_code: str, eng: frappe._dict | None = None):
-	"""Engine policy for the item, or None when its method has no fold parity yet.
-
-	Lot-tracked items fold per lot at moving average — the semantics of legacy
-	batch-wise valuation and per-serial rates."""
+	"""Engine policy for the item, or None when its method has no fold parity yet."""
 	eng = eng or engine()
 	method = get_valuation_method(item_code)
 	if method == "Standard Cost":
 		return None
-
-	detail = frappe.get_cached_value("Item", item_code, ["has_batch_no", "has_serial_no"], as_dict=1)
-	if detail and (detail.has_batch_no or detail.has_serial_no):
-		return eng.MovingAverage()
-
 	if method == "LIFO":
 		return eng.Lifo()
 	if method == "Moving Average":

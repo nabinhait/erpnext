@@ -74,7 +74,14 @@ def run(
 		allocations = _allocations_by_event([row.name for row in rows])
 		try:
 			events = [
-				stock_engine_bridge.to_event(engine, row, allocations.get(str(row.name))) for row in rows
+				stock_engine_bridge.to_event(
+					engine,
+					row,
+					allocations.get(str(row.name))
+					if (legacy.get(row.sle) or {}).get("serial_and_batch_bundle")
+					else None,
+				)
+				for row in rows
 			]
 		except ValueError as error:
 			report["conversion_errors"].append((item_code, warehouse, str(error)))
@@ -178,7 +185,14 @@ def _legacy_rows(sle_names: list[str]) -> dict[str, frappe._dict]:
 	rows = frappe.get_all(
 		"Stock Ledger Entry",
 		filters={"name": ("in", sle_names)},
-		fields=["name", "actual_qty", "qty_after_transaction", "stock_value", "voucher_type"],
+		fields=[
+			"name",
+			"actual_qty",
+			"qty_after_transaction",
+			"stock_value",
+			"voucher_type",
+			"serial_and_batch_bundle",
+		],
 	)
 	return {row.name: row for row in rows}
 
