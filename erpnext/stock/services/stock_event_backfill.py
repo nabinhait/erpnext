@@ -267,3 +267,64 @@ def _events_by_sle(sle_names: list[str]) -> dict[str, frappe._dict]:
 		fields=["name", "sle", "content_hash"],
 	)
 	return {event.sle: event for event in events}
+
+
+def verify_fast(hash_sample_size: int = 20000) -> dict:
+	"""The verify gate at production scale: set-based SQL for the missing and
+	order checks, a random sample for hash determinism.
+
+	Order check: within each (item_code, warehouse), walking SLEs in the
+	legacy total order must yield strictly ascending event ids — one window
+	function query instead of a per-warehouse row walk."""
+	sle = frappe.qb.DocType("Stock Ledger Entry")
+	event = frappe.qb.DocType("Stock Event")
+
+	missing = (
+		frappe.qb.from_(sle)
+		.left_join(event)
+		.on(event.sle == sle.name)
+		.select(frappe.query_builder.functions.Count("*"))
+		.where((sle.is_cancelled == 0) & (event.name.isnull()))
+	).run()[0][0]
+
+	order_violations = frappe.db.sql(
+		"""
+		SELECT COUNT(*) FROM (
+			SELECT e.name,
+				LAG(e.name) OVER (
+					PARTITION BY e.item_code, e.warehouse
+					ORDER BY s.posting_datetime, s.creation, s.name
+				) AS prev
+			FROM `tabStock Event` e
+			JOIN `tabStock Ledger Entry` s ON e.sle = s.name
+			WHERE s.is_cancelled = 0
+		) ordered
+		WHERE ordered.prev IS NOT NULL AND ordered.prev > ordered.name
+		"""
+	)[0][0]
+
+	sample = frappe.db.sql(
+		"""
+		SELECT s.*, e.content_hash AS _event_hash
+		FROM `tabStock Event` e
+		JOIN `tabStock Ledger Entry` s ON e.sle = s.name
+		WHERE s.is_cancelled = 0
+		AND e.name %% 31 = 0
+		LIMIT %s
+		""",
+		hash_sample_size,
+		as_dict=True,
+	)
+	hash_mismatches = sum(
+		1
+		for row in sample
+		if row._event_hash != stock_event_emitter.event_args_from_sle(row, allocations=[])["content_hash"]
+	)
+
+	return {
+		"missing": missing,
+		"order_violations": order_violations,
+		"hash_sample": len(sample),
+		"hash_mismatches": hash_mismatches,
+		"ok": not (missing or order_violations or hash_mismatches),
+	}

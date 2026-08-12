@@ -36,6 +36,8 @@ def run(
 	warehouses: list[str] | None = None,
 	qty_tolerance: float = QTY_TOLERANCE,
 	value_tolerance: float = VALUE_TOLERANCE,
+	shard: int | None = None,
+	shards: int | None = None,
 ) -> dict:
 	engine = stock_engine_bridge.engine()
 	report = {
@@ -50,7 +52,13 @@ def run(
 		"conversion_errors": [],
 	}
 
-	for item_code, warehouse in _keys(warehouses):
+	keys = _keys(warehouses)
+	if shards:
+		keys = keys[shard::shards]
+
+	for index, (item_code, warehouse) in enumerate(keys):
+		if index and index % 5000 == 0:
+			print(f"[shadow] {index}/{len(keys)} keys", flush=True)
 		policy = stock_engine_bridge.policy_for(item_code, engine)
 		if policy is None:
 			report["skipped_standard_cost"].append((item_code, warehouse))
