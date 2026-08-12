@@ -43,11 +43,19 @@ def engine() -> frappe._dict:
 
 
 def policy_for(item_code: str, eng: frappe._dict | None = None):
-	"""Engine policy for the item, or None when its method has no fold parity yet."""
+	"""Engine policy for the item, or None when its method has no fold parity yet.
+
+	Lot-tracked items fold per lot at moving average — the semantics of legacy
+	batch-wise valuation and per-serial rates."""
 	eng = eng or engine()
 	method = get_valuation_method(item_code)
 	if method == "Standard Cost":
 		return None
+
+	detail = frappe.get_cached_value("Item", item_code, ["has_batch_no", "has_serial_no"], as_dict=1)
+	if detail and (detail.has_batch_no or detail.has_serial_no):
+		return eng.MovingAverage()
+
 	if method == "LIFO":
 		return eng.Lifo()
 	if method == "Moving Average":
@@ -70,7 +78,9 @@ def to_event(eng: frappe._dict, row: frappe._dict, allocations: list[frappe._dic
 		posting_datetime=row.posting_datetime,
 		kind=kind,
 		qty_change=flt(row.qty_change),
-		declared_rate=flt(row.declared_rate) if flt(row.qty_change) > 0 else None,
+		declared_rate=flt(row.declared_rate)
+		if flt(row.qty_change) > 0
+		else (flt(row.declared_rate) or None),
 		assert_qty=flt(row.assert_qty) if row.kind == "Assertion" else None,
 		assert_rate=flt(row.assert_rate) if row.kind == "Assertion" else None,
 		reverses_event=cint(row.reverses_event) or None,

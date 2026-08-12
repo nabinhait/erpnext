@@ -66,7 +66,7 @@ def event_args_from_sle(sle: "Document | dict", allocations: list[dict] | None =
 		"posting_datetime": str(sle.get("posting_datetime")),
 		"kind": kind,
 		"qty_change": flt(sle.get("actual_qty")),
-		"declared_rate": flt(sle.get("incoming_rate")) if flt(sle.get("actual_qty")) > 0 else 0.0,
+		"declared_rate": _declared_rate(sle),
 		"assert_qty": flt(sle.get("qty_after_transaction")) if kind == "Assertion" else 0.0,
 		"assert_rate": flt(sle.get("valuation_rate")) if kind == "Assertion" else 0.0,
 		"voucher_type": sle.get("voucher_type"),
@@ -89,6 +89,18 @@ def delete_for_voucher(voucher_type: str, voucher_no: str) -> None:
 	frappe.db.delete("Stock Event", {"voucher_type": voucher_type, "voucher_no": voucher_no})
 
 
+def _declared_rate(sle: "Document | dict") -> float:
+	"""What the business declared: incoming rate on receipts; on issues, only
+	cost-linked legs carry a rate — inward voucher types issuing stock are
+	moving specific stock (transit consumption, purchase returns) at the
+	linked rate legacy stored as outgoing_rate."""
+	if flt(sle.get("actual_qty")) > 0:
+		return flt(sle.get("incoming_rate"))
+	if sle.get("voucher_type") in ("Purchase Receipt", "Purchase Invoice"):
+		return flt(sle.get("outgoing_rate"))
+	return 0.0
+
+
 def _kind(sle: "Document | dict") -> str:
 	if sle.get("is_cancelled"):
 		return "Reversal"
@@ -100,7 +112,7 @@ def _kind(sle: "Document | dict") -> str:
 def _allocations(sle: "Document | dict") -> list[dict]:
 	bundle = sle.get("serial_and_batch_bundle")
 	if not bundle:
-		return []
+		return _field_allocations(sle)
 
 	entries = frappe.get_all(
 		"Serial and Batch Entry",
@@ -111,6 +123,23 @@ def _allocations(sle: "Document | dict") -> list[dict]:
 	return [
 		{"serial_no": row.serial_no, "batch_no": row.batch_no, "qty_change": flt(row.qty)} for row in entries
 	]
+
+
+def _field_allocations(sle: "Document | dict") -> list[dict]:
+	"""Lot facts for pre-bundle rows: v14-era SLEs carry batch_no/serial_no fields."""
+	qty = flt(sle.get("actual_qty"))
+	serials = (sle.get("serial_no") or "").strip()
+	if serials:
+		names = [name.strip() for name in serials.split("\n") if name.strip()]
+		if names and abs(qty) == len(names):
+			sign = 1 if qty > 0 else -1
+			return [{"serial_no": name, "batch_no": None, "qty_change": sign} for name in names]
+		return []
+
+	batch = sle.get("batch_no")
+	if batch and qty:
+		return [{"serial_no": None, "batch_no": batch, "qty_change": qty}]
+	return []
 
 
 def _find_reversed_event(args: dict) -> int | None:

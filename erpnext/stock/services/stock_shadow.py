@@ -207,3 +207,59 @@ def _legacy_inconsistent(rows, legacy: dict, qty_tolerance: float) -> bool:
 		if abs(running - flt(stored.qty_after_transaction)) > qty_tolerance * 1000:
 			return True
 	return False
+
+
+def diagnose(item_code: str, warehouse: str, limit: int = 12) -> list[dict]:
+	"""Row-by-row legacy vs fold comparison for one key, from the first divergence."""
+	engine = stock_engine_bridge.engine()
+	policy = stock_engine_bridge.policy_for(item_code, engine)
+	rows = _event_rows(item_code, warehouse)
+	allocations = _allocations_by_event([row.name for row in rows])
+	events = [stock_engine_bridge.to_event(engine, row, allocations.get(str(row.name))) for row in rows]
+	result = engine.replay(events, engine.FoldContext(policy=policy))
+
+	legacy = {
+		row.name: row
+		for row in frappe.get_all(
+			"Stock Ledger Entry",
+			filters={"name": ("in", [row.sle for row in rows if row.sle])},
+			fields=[
+				"name",
+				"voucher_type",
+				"actual_qty",
+				"incoming_rate",
+				"outgoing_rate",
+				"qty_after_transaction",
+				"stock_value",
+				"stock_value_difference",
+			],
+		)
+	}
+
+	out = []
+	diverged = False
+	for row in rows:
+		stored = legacy.get(row.sle)
+		effect = result.effects.get(cint(row.name))
+		if not stored or not effect:
+			continue
+		delta = abs(_legacy_equivalent_value(result.states[cint(row.name)]) - flt(stored.stock_value))
+		if not diverged and delta <= 0.05:
+			continue
+		diverged = True
+		out.append(
+			{
+				"sle": row.sle,
+				"voucher_type": stored.voucher_type,
+				"qty": stored.actual_qty,
+				"in_rate": stored.incoming_rate,
+				"out_rate": stored.outgoing_rate,
+				"legacy_value": stored.stock_value,
+				"legacy_svd": stored.stock_value_difference,
+				"fold_value": effect.value_after,
+				"fold_delta": effect.value_delta,
+			}
+		)
+		if len(out) >= limit:
+			break
+	return out

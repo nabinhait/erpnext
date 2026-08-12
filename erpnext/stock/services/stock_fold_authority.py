@@ -121,18 +121,9 @@ def _applies(args: dict) -> bool:
 
 
 def _policy_for(engine, item_code: str):
-	"""Item's fold policy; lot-tracked items fold per lot at moving average —
-	the semantics of legacy batch-wise valuation and per-serial rates."""
 	from erpnext.stock.services import stock_engine_bridge
 
-	base = stock_engine_bridge.policy_for(item_code, engine)
-	if base is None:
-		return None
-
-	detail = frappe.get_cached_value("Item", item_code, ["has_batch_no", "has_serial_no"], as_dict=1)
-	if detail and (detail.has_batch_no or detail.has_serial_no):
-		return engine.MovingAverage()
-	return base
+	return stock_engine_bridge.policy_for(item_code, engine)
 
 
 def _allocations(event_names: list) -> dict[str, list[frappe._dict]]:

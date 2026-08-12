@@ -61,7 +61,10 @@ def _insert_events(rows: list[frappe._dict]) -> int:
 	buffer = []
 	for row in rows:
 		args = stock_event_emitter.event_args_from_sle(
-			row, allocations=bundle_entries.get(row.serial_and_batch_bundle, [])
+			row,
+			allocations=bundle_entries.get(row.serial_and_batch_bundle)
+			if row.serial_and_batch_bundle
+			else None,
 		)
 		args["source"] = "Backfill"
 		buffer.append(args)
