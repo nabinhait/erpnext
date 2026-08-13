@@ -35,20 +35,69 @@ HASH_FIELDS = (
 )
 
 
-def emit_for_sle(sle: "Document | dict", source: str = "Dual Write") -> "Document":
-	"""Insert the Stock Event fact for one Stock Ledger Entry."""
+def emit_for_sle(sle: "Document | dict", source: str = "Dual Write") -> frappe._dict:
+	"""Insert the Stock Event fact for one Stock Ledger Entry.
+
+	Hot path: a sequence-reserved direct insert (no doc machinery), with the
+	fresh event stashed on frappe.local so fold authority in the same request
+	folds it without re-reading it."""
 	args = event_args_from_sle(sle)
 	args["source"] = source
 
 	if args["kind"] == "Reversal":
 		args["reverses_event"] = _find_reversed_event(args)
 
-	event = frappe.get_doc(args)
-	event.flags.ignore_permissions = True
-	event.flags.ignore_links = True
-	event.flags.via_stock_event_emitter = True
-	event.insert()
+	event_id = frappe.db.get_next_sequence_val("Stock Event")
+	timestamp = frappe.utils.now()
+	row = {
+		**{key: value for key, value in args.items() if key not in ("doctype", "allocations")},
+		"name": event_id,
+		"creation": timestamp,
+		"modified": timestamp,
+		"owner": "Administrator",
+		"modified_by": "Administrator",
+	}
+	frappe.db.bulk_insert("Stock Event", tuple(row), [list(row.values())])
+
+	allocation_rows = [
+		[
+			frappe.generate_hash(length=10),
+			str(event_id),
+			"Stock Event",
+			"allocations",
+			position,
+			allocation.get("serial_no"),
+			allocation.get("batch_no"),
+			allocation.get("qty_change"),
+			timestamp,
+			timestamp,
+			"Administrator",
+			"Administrator",
+		]
+		for position, allocation in enumerate(args.get("allocations") or [], start=1)
+	]
+	if allocation_rows:
+		frappe.db.bulk_insert("Stock Event Allocation", ALLOCATION_FIELDS, allocation_rows)
+
+	event = frappe._dict(args, name=event_id)
+	frappe.local.stock_event_last_emitted = event
 	return event
+
+
+ALLOCATION_FIELDS = (
+	"name",
+	"parent",
+	"parenttype",
+	"parentfield",
+	"idx",
+	"serial_no",
+	"batch_no",
+	"qty_change",
+	"creation",
+	"modified",
+	"owner",
+	"modified_by",
+)
 
 
 def event_args_from_sle(sle: "Document | dict", allocations: list[dict] | None = None) -> dict:

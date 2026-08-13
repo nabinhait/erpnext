@@ -86,7 +86,7 @@ def _try_fold(args: dict, allow_negative_stock: bool) -> str | None:
 	if _has_future_events(event_row):
 		return _refold(engine, policy, event_row, args, allow_negative_stock)
 
-	state, last_event = _load_state(engine, event_row)
+	state, last_event, checkpoint = _load_state(engine, event_row)
 	if state is None:
 		return None
 
@@ -107,7 +107,7 @@ def _try_fold(args: dict, allow_negative_stock: bool) -> str | None:
 
 	_project_sle(event_row.sle, result.final, effect, policy, engine)
 	_project_bin(event_row, result.final)
-	_save_state(engine, event_row, result.final)
+	_save_state(engine, event_row, result.final, checkpoint)
 	return APPENDED
 
 
@@ -375,6 +375,11 @@ def invalidate(item_code: str, warehouse: str) -> None:
 def _event_row(sle_name: str | None) -> frappe._dict | None:
 	if not sle_name:
 		return None
+
+	emitted = getattr(frappe.local, "stock_event_last_emitted", None)
+	if emitted is not None and emitted.get("sle") == sle_name:
+		return emitted
+
 	rows = frappe.get_all(
 		"Stock Event",
 		filters={"sle": sle_name},
@@ -426,11 +431,11 @@ def _load_state(engine, event_row: frappe._dict) -> tuple:
 		for_update=True,
 	)
 	if stored:
-		return stock_engine_bridge.deserialize_state(engine, json.loads(stored.state_json)), cint(
-			stored.last_event
-		)
+		state = stock_engine_bridge.deserialize_state(engine, json.loads(stored.state_json))
+		return state, cint(stored.last_event), stored.name
 
-	return _rebuild(engine, event_row)
+	state, last_event = _rebuild(engine, event_row)
+	return state, last_event, None
 
 
 def _rebuild(engine, event_row: frappe._dict) -> tuple:
@@ -539,25 +544,29 @@ def _project_bin(event_row: frappe._dict, final_state) -> None:
 	)
 
 
-def _save_state(engine, event_row: frappe._dict, state) -> None:
+def _save_state(engine, event_row: frappe._dict, state, checkpoint: str | None = None) -> None:
 	from erpnext.stock.services import stock_engine_bridge
 
 	payload = {
 		"last_event": cint(event_row.name),
 		"state_json": json.dumps(stock_engine_bridge.serialize_state(state)),
 	}
-	existing = frappe.db.get_value(
+	existing = checkpoint or frappe.db.get_value(
 		"Stock Fold State", {"item_code": event_row.item_code, "warehouse": event_row.warehouse}, "name"
 	)
 	if existing:
 		frappe.db.set_value("Stock Fold State", existing, payload, update_modified=True)
 		return
 
-	doc = frappe.get_doc(
-		doctype="Stock Fold State",
-		item_code=event_row.item_code,
-		warehouse=event_row.warehouse,
+	timestamp = frappe.utils.now()
+	row = {
+		"name": frappe.generate_hash(length=10),
+		"item_code": event_row.item_code,
+		"warehouse": event_row.warehouse,
 		**payload,
-	)
-	doc.flags.ignore_permissions = True
-	doc.insert()
+		"creation": timestamp,
+		"modified": timestamp,
+		"owner": "Administrator",
+		"modified_by": "Administrator",
+	}
+	frappe.db.bulk_insert("Stock Fold State", tuple(row), [list(row.values())])
