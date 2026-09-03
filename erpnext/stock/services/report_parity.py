@@ -63,14 +63,41 @@ def stock_balance(company: str, from_date: str, to_date: str, warehouse: str | N
 				report["value_mismatches"].append(
 					{"key": key, "legacy": flt(legacy.get("bal_val")), "fold": flt(fold.get("bal_val"))}
 				)
-		elif len(report["qty_mismatches"]) < MAX_EXAMPLES:
+		else:
 			report["qty_mismatches"].append(
 				{"key": key, "legacy": flt(legacy.get("bal_qty")), "fold": flt(fold.get("bal_qty"))}
 			)
 
 	report["only_legacy_count"] = len(report["only_legacy"])
 	report["only_fold_count"] = len(report["only_fold"])
+	_arbitrate(report, to_date)
 	return report
+
+
+def _arbitrate(report: dict, to_date: str) -> None:
+	"""Referee disputed keys against the ledger itself: the live SLE quantity
+	sum up to the boundary is ground truth no report can argue with."""
+	verdicts = {"legacy_wrong": 0, "fold_wrong": 0, "both_wrong": 0}
+	for mismatch in report["qty_mismatches"]:
+		item_code, warehouse = mismatch["key"]
+		truth = flt(
+			frappe.db.sql(
+				"""SELECT SUM(actual_qty) FROM `tabStock Ledger Entry`
+				WHERE item_code=%s AND warehouse=%s AND is_cancelled=0 AND posting_date<=%s""",
+				(item_code, warehouse, to_date),
+			)[0][0]
+		)
+		mismatch["truth"] = truth
+		legacy_ok = abs(mismatch["legacy"] - truth) <= QTY_TOLERANCE
+		fold_ok = abs(mismatch["fold"] - truth) <= QTY_TOLERANCE
+		if fold_ok and not legacy_ok:
+			verdicts["legacy_wrong"] += 1
+		elif legacy_ok and not fold_ok:
+			verdicts["fold_wrong"] += 1
+		elif not legacy_ok and not fold_ok:
+			verdicts["both_wrong"] += 1
+	report["qty_arbitration"] = verdicts
+	report["qty_mismatches"] = report["qty_mismatches"][:MAX_EXAMPLES]
 
 
 def _index(rows) -> dict:
