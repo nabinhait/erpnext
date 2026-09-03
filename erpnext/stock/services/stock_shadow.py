@@ -48,6 +48,8 @@ def run(
 		"class_a_keys": [],
 		"batchwise_keys": [],
 		"batchwise_key_count": 0,
+		"hybrid_keys": [],
+		"hybrid_key_count": 0,
 		"class_b": [],
 		"negative_exposure": [],
 		"skipped_standard_cost": [],
@@ -107,6 +109,33 @@ def run(
 					if len(report["batchwise_keys"]) < MAX_EXAMPLES:
 						report["batchwise_keys"].append((item_code, warehouse))
 					report["batchwise_key_count"] += 1
+				else:
+					hybrid = _match_hybrid(rows, result, lot_result, legacy, value_tolerance)
+					if hybrid is not None:
+						boundary, offset = hybrid
+						report["hybrid_key_count"] += 1
+						if len(report["hybrid_keys"]) < MAX_EXAMPLES:
+							report["hybrid_keys"].append(
+								{
+									"item_code": item_code,
+									"warehouse": warehouse,
+									"switchover": str(rows[boundary].posting_datetime),
+									"offset": round(offset, 4),
+									"riv_found": bool(
+										frappe.db.exists(
+											"Repost Item Valuation",
+											{
+												"item_code": item_code,
+												"warehouse": warehouse,
+												"docstatus": 1,
+											},
+										)
+									),
+								}
+							)
+						report["events"] += len(rows)
+						report["matched"] += sum(1 for row in rows if row.sle in legacy)
+						continue
 			except ValueError:
 				pass
 
@@ -185,6 +214,48 @@ def _event_rows(item_code: str, warehouse: str) -> list[frappe._dict]:
 		],
 		order_by="posting_datetime, name",
 	)
+
+
+def _match_hybrid(rows, agg_result, lot_result, legacy, value_tolerance):
+	"""Detect a partially-reposted key: aggregate values up to a boundary, then
+	batchwise values seeded from the boundary's stored balance.
+
+	Legacy's repost re-derives each restated row from the stored previous
+	balance while consuming at per-batch rates, so the suffix equals the
+	per-lot fold shifted by a constant: the aggregate-vs-lot value gap at the
+	boundary. Returns (boundary_index, offset) or None."""
+	band = value_tolerance * 10
+	boundary = None
+	for index, row in enumerate(rows):
+		stored = legacy.get(row.sle)
+		if stored is None:
+			continue
+		agg_value = _legacy_equivalent_value(agg_result.states[cint(row.name)])
+		if abs(agg_value - flt(stored.stock_value)) > band:
+			boundary = index
+			break
+
+	if not boundary:  # no divergence, or diverged on the very first row
+		return None
+
+	previous = next(
+		(legacy.get(rows[i].sle) for i in range(boundary - 1, -1, -1) if legacy.get(rows[i].sle)), None
+	)
+	if previous is None:
+		return None
+	offset = flt(previous.stock_value) - _legacy_equivalent_value(
+		lot_result.states[cint(rows[boundary - 1].name)]
+	)
+
+	for row in rows[boundary:]:
+		stored = legacy.get(row.sle)
+		if stored is None:
+			continue
+		lot_value = _legacy_equivalent_value(lot_result.states[cint(row.name)])
+		if abs(lot_value + offset - flt(stored.stock_value)) > band:
+			return None
+
+	return boundary, offset
 
 
 def _has_misfits(rows, result, legacy, qty_tolerance, value_tolerance) -> bool:
