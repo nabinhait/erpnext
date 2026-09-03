@@ -156,8 +156,11 @@ class StockClosingEntry(Document):
 			)
 
 	def remove_stock_closing(self):
+		from erpnext.stock.services import stock_fold_read
+
 		table = frappe.qb.DocType("Stock Closing Balance")
 		frappe.qb.from_(table).delete().where(table.stock_closing_entry == self.name).run()
+		stock_fold_read.delete_checkpoints(self.name)
 
 	@frappe.whitelist(methods=["POST"])
 	def enqueue_job(self):
@@ -202,6 +205,18 @@ class StockClosingEntry(Document):
 			new_doc.stock_closing_entry = self.name
 			new_doc.company = self.company
 			new_doc.save(ignore_permissions=True)
+
+		self.create_fold_checkpoints()
+
+	def create_fold_checkpoints(self):
+		"""Checkpoint every active key's fold state at this closing, so reads
+		and refolds start here instead of the beginning of history."""
+		if not frappe.db.count("Stock Event", {"company": self.company}):
+			return
+
+		from erpnext.stock.services import stock_fold_read
+
+		stock_fold_read.create_checkpoints(self)
 
 	def get_prepared_data(self):
 		if attachments := get_attachments(self.doctype, self.name):
