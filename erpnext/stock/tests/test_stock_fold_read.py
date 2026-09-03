@@ -74,3 +74,33 @@ class TestStockFoldRead(ERPNextTestSuite):
 			self.assertAlmostEqual(state.value, 900, places=4)
 		finally:
 			frappe.conf.pop("stock_event_dual_write", None)
+
+	def test_stock_balance_report_parity(self):
+		"""The fold-based Stock Balance must agree with the legacy report on a
+		clean scenario, opening balances included."""
+		from erpnext.stock.services import report_parity
+
+		item = make_item(properties={"is_stock_item": 1}).name
+		warehouse = create_warehouse("Fold Balance WH")
+
+		frappe.conf.stock_event_dual_write = 1
+		try:
+			make_stock_entry(
+				item_code=item, target=warehouse, qty=10, rate=100, posting_date=add_days(today(), -10)
+			)
+			make_stock_entry(item_code=item, source=warehouse, qty=2, posting_date=add_days(today(), -6))
+			make_stock_entry(
+				item_code=item, target=warehouse, qty=5, rate=120, posting_date=add_days(today(), -2)
+			)
+			make_stock_entry(item_code=item, source=warehouse, qty=4)
+
+			report = report_parity.stock_balance(
+				"_Test Company", add_days(today(), -7), today(), warehouse=warehouse
+			)
+		finally:
+			frappe.conf.pop("stock_event_dual_write", None)
+
+		self.assertEqual(report["compared"], 1)
+		self.assertEqual(report["qty_matched"], 1)
+		self.assertEqual(report["value_matched"], 1, msg=str(report))
+		self.assertFalse(report["only_legacy_count"] or report["only_fold_count"])
