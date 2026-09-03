@@ -284,11 +284,11 @@ def _post_gl_adjustment(args: dict, event_row: frappe._dict, projections: dict, 
 	if not warehouse_account:
 		return  # no perpetual stock GL on this warehouse: nothing to correct
 
-	current = (args.get("voucher_type"), args.get("voucher_no"))
+	excluded = args.get("exclude_voucher") or (args.get("voucher_type"), args.get("voucher_no"))
 	deltas: dict[tuple[str, str], float] = {}
 	for sle_name, projection in projections.items():
 		stored = live.get(sle_name)
-		if stored is None or (stored.voucher_type, stored.voucher_no) == current:
+		if stored is None or (stored.voucher_type, stored.voucher_no) == tuple(excluded):
 			continue
 
 		delta = flt(projection["svd"]) - flt(stored.stock_value_difference)
@@ -337,7 +337,7 @@ def _adjustment_row(args: dict, account: str, against: str, debit: float, postin
 			"company": args.get("company"),
 			"posting_date": posting_date,
 			"cost_center": frappe.get_cached_value("Company", args.get("company"), "cost_center"),
-			"remarks": "Stock value adjustment for backdated entry",
+			"remarks": args.get("adjustment_remark") or "Stock value adjustment for backdated entry",
 			"is_opening": "No",
 		}
 	)
@@ -475,12 +475,14 @@ def revalue(
 		warehouse=warehouse,
 		posting_datetime=emitted.posting_datetime,
 	)
-	# the source voucher's own GL correction is the caller's (it carries the
-	# expense account); exclude it from the generic downstream adjustments
+	# downstream adjustments are carried on the revising voucher; the source
+	# receipt's own correction is the caller's (it carries the expense account)
 	args = {
 		"company": source.company,
-		"voucher_type": source.voucher_type,
-		"voucher_no": source.voucher_no,
+		"voucher_type": voucher_type,
+		"voucher_no": voucher_no,
+		"exclude_voucher": (source.voucher_type, source.voucher_no),
+		"adjustment_remark": "Stock value adjustment for landed cost",
 	}
 	outcome = _refold(engine, policy, event_row, args, allow_negative_stock=True)
 	if outcome is None:

@@ -459,6 +459,25 @@ class TestStockFoldAuthority(ERPNextTestSuite):
 		self.assertTrue(
 			frappe.get_all("GL Entry", filters={"voucher_no": fold_vouchers[2], "is_cancelled": 0})
 		)
+		self.assertTrue(
+			frappe.get_all(
+				"GL Entry",
+				filters={
+					"voucher_no": fold_vouchers[2],
+					"is_cancelled": 0,
+					"remarks": ("like", "%landed cost%"),
+				},
+			)
+		)
+		# downstream corrections never land on other vouchers
+		for voucher in fold_vouchers[:2]:
+			self.assertFalse(
+				frappe.get_all(
+					"GL Entry",
+					filters={"voucher_no": voucher, "remarks": ("like", "Stock value adjustment%")},
+				),
+				msg=voucher,
+			)
 
 		# ledger values identical to legacy-after-repost
 		legacy_rows = self._valuation_rows(item, legacy_warehouse)
