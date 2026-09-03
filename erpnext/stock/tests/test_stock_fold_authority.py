@@ -574,6 +574,36 @@ class TestStockFoldAuthority(ERPNextTestSuite):
 			for field in ("qty_after_transaction", "stock_value", "stock_value_difference"):
 				self.assertAlmostEqual(legacy[field], fold[field], places=4, msg=field)
 
+		# cancel mirrors: negative fact + LCV's own GL reversed, nothing new posted
+		frappe.conf.stock_event_dual_write = 1
+		frappe.conf.stock_fold_authoritative = 1
+		frappe.conf.stock_fold_gl_adjustment = 1
+		try:
+			frappe.get_doc("Landed Cost Voucher", fold_vouchers[2]).cancel()
+		finally:
+			frappe.conf.pop("stock_fold_gl_adjustment", None)
+			frappe.conf.pop("stock_fold_authoritative", None)
+			frappe.conf.pop("stock_event_dual_write", None)
+		frappe.get_doc("Landed Cost Voucher", legacy_vouchers[2]).cancel()
+		self._process_pending_reposts()
+
+		revaluations = frappe.get_all(
+			"Stock Event",
+			filters={"kind": "Revaluation", "voucher_no": fold_vouchers[2]},
+			fields=["value_change"],
+		)
+		self.assertEqual(len(revaluations), 2)
+		self.assertAlmostEqual(sum(row.value_change for row in revaluations), 0, places=4)
+		self.assertFalse(
+			frappe.get_all("GL Entry", filters={"voucher_no": fold_vouchers[2], "is_cancelled": 0})
+		)
+		legacy_rows = self._valuation_rows(item, legacy_warehouse)
+		fold_rows = self._valuation_rows(item, fold_warehouse)
+		self.assertEqual(len(legacy_rows), len(fold_rows))
+		for legacy, fold in zip(legacy_rows, fold_rows, strict=True):
+			for field in ("qty_after_transaction", "stock_value", "stock_value_difference"):
+				self.assertAlmostEqual(legacy[field], fold[field], places=4, msg=field)
+
 		# and the books net out the same
 		self.assertEqual(
 			self._account_balances(legacy_vouchers, legacy_warehouse),

@@ -216,11 +216,30 @@ def _refold(engine, policy, event_row: frappe._dict, args: dict, allow_negative_
 		_save_state(engine, frappe._dict({**key, "name": last_id}), result.final)
 
 	if frappe.conf.get(GL_ADJUSTMENT_FLAG):
-		_post_gl_adjustment(args, event_row, projections, live)
+		if not args.get("skip_gl_adjustment"):
+			_post_gl_adjustment(args, event_row, projections, live)
 	elif frappe.conf.get(SUPPRESS_FLAG):
 		_regenerate_gl(args, event_row, live.values())
 
 	return REFOLDED
+
+
+def _open_period_date(posting_date, closed_until, fallback) -> str:
+	"""Adjustments never post into a closed accounting period: dates at or
+	before the latest Period Closing Voucher clamp to the revising voucher's
+	own date (which passed close validation at submit)."""
+	if closed_until and str(posting_date) <= str(closed_until):
+		return str(fallback)
+	return str(posting_date)
+
+
+def _closed_until(company: str):
+	return frappe.db.get_value(
+		"Period Closing Voucher",
+		{"docstatus": 1, "company": company},
+		"period_end_date",
+		order_by="period_end_date desc",
+	)
 
 
 def _equivalent_value(state) -> float:
@@ -294,6 +313,8 @@ def _post_gl_adjustment(args: dict, event_row: frappe._dict, projections: dict, 
 		return  # no perpetual stock GL on this warehouse: nothing to correct
 
 	excluded = args.get("exclude_voucher") or (args.get("voucher_type"), args.get("voucher_no"))
+	closed_until = _closed_until(args.get("company"))
+	fallback_date = args.get("posting_date") or frappe.utils.nowdate()
 	deltas: dict[tuple[str, str], float] = {}
 	for sle_name, projection in projections.items():
 		stored = live.get(sle_name)
@@ -306,7 +327,7 @@ def _post_gl_adjustment(args: dict, event_row: frappe._dict, projections: dict, 
 
 		counter = _counter_account(stored.voucher_type, stored.voucher_no, warehouse_account)
 		if counter:
-			key = (counter, str(stored.posting_date))
+			key = (counter, _open_period_date(stored.posting_date, closed_until, fallback_date))
 			deltas[key] = deltas.get(key, 0.0) + delta
 
 	gl_map = []
@@ -443,6 +464,7 @@ def revalue(
 	value_change: float,
 	voucher_type: str,
 	voucher_no: str,
+	skip_gl_adjustment: bool = False,
 ) -> str | None:
 	"""Apply a cost revision (landed cost) as a Revaluation fact and refold.
 
@@ -490,8 +512,10 @@ def revalue(
 		"company": source.company,
 		"voucher_type": voucher_type,
 		"voucher_no": voucher_no,
+		"posting_date": frappe.db.get_value(voucher_type, voucher_no, "posting_date"),
 		"exclude_voucher": (source.voucher_type, source.voucher_no),
 		"adjustment_remark": "Stock value adjustment for landed cost",
+		"skip_gl_adjustment": skip_gl_adjustment,
 	}
 	outcome = _refold(engine, policy, event_row, args, allow_negative_stock=True)
 	if outcome is None:
@@ -525,9 +549,11 @@ def post_revaluation_gl(
 	voucher_type: str,
 	voucher_no: str,
 	credit_account: str,
+	fallback_date: str | None = None,
 ) -> None:
 	"""The source-side GL of a revaluation: stock up, expense account down,
-	carried on the revising voucher, dated at the revalued receipt."""
+	carried on the revising voucher, dated at the revalued receipt — clamped
+	to the revising voucher's date when the receipt sits in a closed period."""
 	from erpnext.accounts.general_ledger import make_gl_entries
 	from erpnext.stock import get_warehouse_account_map
 
@@ -535,6 +561,9 @@ def post_revaluation_gl(
 	if not warehouse_account:
 		return
 
+	posting_date = _open_period_date(
+		posting_date, _closed_until(company), fallback_date or frappe.utils.nowdate()
+	)
 	args = {"voucher_type": voucher_type, "voucher_no": voucher_no, "company": company}
 	make_gl_entries(
 		[

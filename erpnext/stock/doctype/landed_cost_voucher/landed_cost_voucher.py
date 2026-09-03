@@ -397,6 +397,7 @@ class LandedCostVoucher(Document):
 		self.update_claimed_landed_cost()
 
 	def on_cancel(self):
+		self.ignore_linked_doctypes = ("GL Entry", "Stock Ledger Entry", "Stock Event")
 		self.update_landed_cost()
 		self.update_claimed_landed_cost()
 
@@ -513,9 +514,16 @@ class LandedCostVoucher(Document):
 		if not plan:
 			return False
 
+		cancelling = self.docstatus == 2
 		for item, source_event, delta in plan:
 			outcome = stock_fold_authority.revalue(
-				item.item_code, item.warehouse, source_event, delta, self.doctype, self.name
+				item.item_code,
+				item.warehouse,
+				source_event,
+				delta,
+				self.doctype,
+				self.name,
+				skip_gl_adjustment=cancelling,
 			)
 			if outcome is None:
 				frappe.throw(
@@ -523,6 +531,8 @@ class LandedCostVoucher(Document):
 						"Could not apply landed cost for {0} in {1} through the stock engine; please retry."
 					).format(item.item_code, item.warehouse)
 				)
+			if cancelling:
+				continue
 			remaining = delta
 			for index, (account, fraction) in enumerate(splits):
 				portion = remaining if index == len(splits) - 1 else flt(delta * fraction, 2)
@@ -535,7 +545,12 @@ class LandedCostVoucher(Document):
 					self.doctype,
 					self.name,
 					account,
+					fallback_date=str(self.posting_date),
 				)
+		if cancelling:
+			from erpnext.accounts.general_ledger import make_reverse_gl_entries
+
+			make_reverse_gl_entries(voucher_type=self.doctype, voucher_no=self.name)
 		return True
 
 	def validate_asset_qty_and_status(self, receipt_document_type, receipt_document):
