@@ -142,12 +142,14 @@ def _allocations(event_names: list) -> dict[str, list[frappe._dict]]:
 
 
 def _refold(engine, policy, event_row: frappe._dict, args: dict, allow_negative_stock: bool) -> str | None:
-	"""Backdated insert: synchronously refold the whole key and rewrite the
-	projections of every row whose values changed."""
+	"""Backdated insert or revaluation: synchronously refold the whole key and
+	rewrite the projections of every row whose values changed. Bundle-backed
+	lot keys fold their allocations as lot sub-states; lot keys carrying
+	assertions stay legacy (an assertion cannot reconstruct lots)."""
 	from erpnext.stock.services import stock_engine_bridge
 
 	key = {"item_code": event_row.item_code, "warehouse": event_row.warehouse}
-	if not _history_foldable(key, allow_lots=False):
+	if not _history_foldable(key, allow_lots=True):
 		return None
 
 	rows = frappe.get_all(
@@ -175,8 +177,15 @@ def _refold(engine, policy, event_row: frappe._dict, args: dict, allow_negative_
 	# untouched by the backdate — never re-project it
 	changed_rows = rows[1:] if window[0] > 0 else rows
 
+	bundle_rows = _bundle_backed_sles(key)
+	allocations = _allocations([row.name for row in rows])
 	try:
-		events = [stock_engine_bridge.to_event(engine, row) for row in rows]
+		events = [
+			stock_engine_bridge.to_event(
+				engine, row, allocations.get(str(row.name)) if row.sle in bundle_rows else None
+			)
+			for row in rows
+		]
 	except ValueError:
 		return None
 
@@ -505,7 +514,7 @@ def can_revalue(item_code: str, warehouse: str) -> bool:
 	engine = stock_engine_bridge.engine()
 	if _policy_for(engine, item_code) is None:
 		return False
-	return _history_foldable({"item_code": item_code, "warehouse": warehouse}, allow_lots=False)
+	return _history_foldable({"item_code": item_code, "warehouse": warehouse}, allow_lots=True)
 
 
 def post_revaluation_gl(

@@ -299,6 +299,93 @@ class TestStockFoldAuthority(ERPNextTestSuite):
 
 		self.assertFalse(frappe.db.exists("Stock Fold State", {"item_code": item, "warehouse": warehouse}))
 
+	def test_lot_landed_cost_as_revaluation(self):
+		"""Batch- and serial-tracked LCVs take the fold path too: allocations fold
+		as lot sub-states, the revaluation uplifts the lots, and the books net
+		identically to legacy's rewrite — with difference entries and no RIVs."""
+		from erpnext.stock.doctype.landed_cost_voucher.test_landed_cost_voucher import (
+			create_landed_cost_voucher,
+		)
+		from erpnext.stock.doctype.purchase_receipt.test_purchase_receipt import make_purchase_receipt
+
+		company = "_Test Company with perpetual inventory"
+		tracked_items = {
+			"batch": make_item(
+				properties={
+					"is_stock_item": 1,
+					"has_batch_no": 1,
+					"create_new_batch": 1,
+					"batch_number_series": "FOLDLCV-.#####",
+				}
+			).name,
+			"serial": make_item(
+				properties={
+					"is_stock_item": 1,
+					"has_serial_no": 1,
+					"serial_no_series": "FOLDSN-.#####",
+				}
+			).name,
+		}
+
+		previous = frappe.db.get_single_value(
+			"Stock Settings", "auto_create_serial_and_batch_bundle_for_outward"
+		)
+		frappe.db.set_single_value("Stock Settings", "auto_create_serial_and_batch_bundle_for_outward", 1)
+		frappe.conf.stock_event_dual_write = 1
+		try:
+			results = {}
+			for label, item in tracked_items.items():
+				legacy_warehouse = create_warehouse(f"LCV Lot Legacy {label} WH", company=company)
+				fold_warehouse = create_warehouse(f"LCV Lot Fold {label} WH", company=company)
+
+				def scenario(warehouse, item=item):
+					receipt = make_purchase_receipt(
+						item_code=item, qty=10, rate=100, warehouse=warehouse, company=company
+					)
+					issue = make_stock_entry(item_code=item, source=warehouse, qty=4, company=company)
+					lcv = create_landed_cost_voucher("Purchase Receipt", receipt.name, company, charges=200)
+					return [receipt.name, issue.name, lcv.name]
+
+				frappe.conf.pop("stock_fold_authoritative", None)
+				frappe.conf.pop("stock_fold_gl_adjustment", None)
+				legacy_vouchers = scenario(legacy_warehouse)
+				self._process_pending_reposts()
+
+				frappe.conf.stock_fold_authoritative = 1
+				frappe.conf.stock_fold_gl_adjustment = 1
+				fold_vouchers = scenario(fold_warehouse)
+				results[label] = (legacy_warehouse, fold_warehouse, legacy_vouchers, fold_vouchers, item)
+		finally:
+			frappe.conf.pop("stock_fold_gl_adjustment", None)
+			frappe.conf.pop("stock_fold_authoritative", None)
+			frappe.conf.pop("stock_event_dual_write", None)
+			frappe.db.set_single_value(
+				"Stock Settings", "auto_create_serial_and_batch_bundle_for_outward", previous
+			)
+
+		for label, (legacy_warehouse, fold_warehouse, legacy_vouchers, fold_vouchers, item) in results.items():
+			self.assertFalse(
+				frappe.get_all("Repost Item Valuation", filters={"voucher_no": ("in", fold_vouchers)}),
+				msg=label,
+			)
+			self.assertTrue(
+				frappe.db.exists("Stock Event", {"kind": "Revaluation", "voucher_no": fold_vouchers[2]}),
+				msg=label,
+			)
+
+			legacy_rows = self._valuation_rows(item, legacy_warehouse)
+			fold_rows = self._valuation_rows(item, fold_warehouse)
+			self.assertEqual(len(legacy_rows), len(fold_rows), msg=label)
+			for legacy, fold in zip(legacy_rows, fold_rows, strict=True):
+				for field in ("qty_after_transaction", "stock_value", "stock_value_difference"):
+					self.assertAlmostEqual(legacy[field], fold[field], places=4, msg=f"{label}:{field}")
+
+			self.assertEqual(
+				self._account_balances(legacy_vouchers, legacy_warehouse),
+				self._account_balances(fold_vouchers, fold_warehouse),
+				msg=label,
+			)
+
 	def _run_backdate_scenario(self, item: str, warehouse: str, company: str) -> list[str]:
 		vouchers = [
 			make_stock_entry(
