@@ -76,6 +76,7 @@ def to_event(eng: frappe._dict, row: frappe._dict, allocations: list[frappe._dic
 		assert_qty=flt(row.assert_qty) if row.kind == "Assertion" else None,
 		assert_rate=flt(row.assert_rate) if row.kind == "Assertion" else None,
 		reverses_event=cint(row.reverses_event) or None,
+		value_change=flt(row.get("value_change")),
 		allocations=tuple(_to_allocation(eng, alloc) for alloc in allocations or []),
 	)
 

@@ -405,3 +405,71 @@ class TestStockFoldAuthority(ERPNextTestSuite):
 		for legacy_layer, fold_layer in zip(legacy, fold, strict=True):
 			self.assertAlmostEqual(legacy_layer[0], fold_layer[0], places=4)
 			self.assertAlmostEqual(legacy_layer[1], fold_layer[1], places=4)
+
+	def test_landed_cost_as_revaluation(self):
+		"""An LCV under fold authority posts append-only revaluation GL and
+		trues up downstream consumption — netting the same books as legacy's
+		cancel/recreate, with no Repost Item Valuation."""
+		from erpnext.stock.doctype.landed_cost_voucher.test_landed_cost_voucher import (
+			create_landed_cost_voucher,
+		)
+		from erpnext.stock.doctype.purchase_receipt.test_purchase_receipt import make_purchase_receipt
+
+		company = "_Test Company with perpetual inventory"
+		item = make_item(properties={"is_stock_item": 1}).name
+		legacy_warehouse = create_warehouse("LCV Legacy WH", company=company)
+		fold_warehouse = create_warehouse("LCV Fold WH", company=company)
+
+		def scenario(warehouse):
+			receipt = make_purchase_receipt(
+				item_code=item, qty=10, rate=100, warehouse=warehouse, company=company
+			)
+			issue = make_stock_entry(item_code=item, source=warehouse, qty=4, company=company)
+			lcv = create_landed_cost_voucher("Purchase Receipt", receipt.name, company, charges=200)
+			return [receipt.name, issue.name, lcv.name]
+
+		frappe.conf.stock_event_dual_write = 1
+		try:
+			legacy_vouchers = scenario(legacy_warehouse)
+			self._process_pending_reposts()
+
+			frappe.conf.stock_fold_authoritative = 1
+			frappe.conf.stock_fold_gl_adjustment = 1
+			fold_vouchers = scenario(fold_warehouse)
+		finally:
+			frappe.conf.pop("stock_fold_gl_adjustment", None)
+			frappe.conf.pop("stock_fold_authoritative", None)
+			frappe.conf.pop("stock_event_dual_write", None)
+
+		# no repost machinery on the fold side
+		self.assertFalse(
+			frappe.get_all("Repost Item Valuation", filters={"voucher_no": ("in", fold_vouchers)})
+		)
+		riv_item = frappe.get_all(
+			"Repost Item Valuation", filters={"item_code": item, "warehouse": fold_warehouse}
+		)
+		self.assertFalse(riv_item)
+
+		# the revaluation fact exists and the LCV carries its GL
+		self.assertTrue(
+			frappe.db.exists(
+				"Stock Event", {"kind": "Revaluation", "voucher_no": fold_vouchers[2]}
+			)
+		)
+		self.assertTrue(
+			frappe.get_all("GL Entry", filters={"voucher_no": fold_vouchers[2], "is_cancelled": 0})
+		)
+
+		# ledger values identical to legacy-after-repost
+		legacy_rows = self._valuation_rows(item, legacy_warehouse)
+		fold_rows = self._valuation_rows(item, fold_warehouse)
+		self.assertEqual(len(legacy_rows), len(fold_rows))
+		for legacy, fold in zip(legacy_rows, fold_rows, strict=True):
+			for field in ("qty_after_transaction", "stock_value", "stock_value_difference"):
+				self.assertAlmostEqual(legacy[field], fold[field], places=4, msg=field)
+
+		# and the books net out the same
+		self.assertEqual(
+			self._account_balances(legacy_vouchers, legacy_warehouse),
+			self._account_balances(fold_vouchers, fold_warehouse),
+		)

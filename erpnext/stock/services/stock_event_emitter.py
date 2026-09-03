@@ -100,6 +100,45 @@ ALLOCATION_FIELDS = (
 )
 
 
+def emit_revaluation(
+	item_code: str,
+	warehouse: str,
+	company: str,
+	posting_datetime: str,
+	source_event: int,
+	value_change: float,
+	voucher_type: str,
+	voucher_no: str,
+) -> frappe._dict:
+	"""Insert a Revaluation fact: a cost revision on a prior receipt, ordered
+	at the receipt's own instant so the refold trues up everything after it."""
+	event_id = frappe.db.get_next_sequence_val("Stock Event")
+	timestamp = frappe.utils.now()
+	row = {
+		"name": event_id,
+		"item_code": item_code,
+		"warehouse": warehouse,
+		"company": company,
+		"posting_datetime": str(posting_datetime),
+		"kind": "Revaluation",
+		"qty_change": 0.0,
+		"declared_rate": 0.0,
+		"assert_qty": 0.0,
+		"assert_rate": 0.0,
+		"reverses_event": source_event,
+		"value_change": flt(value_change),
+		"voucher_type": voucher_type,
+		"voucher_no": voucher_no,
+		"source": "Dual Write",
+		"creation": timestamp,
+		"modified": timestamp,
+		"owner": "Administrator",
+		"modified_by": "Administrator",
+	}
+	frappe.db.bulk_insert("Stock Event", tuple(row), [list(row.values())])
+	return frappe._dict(row)
+
+
 def event_args_from_sle(sle: "Document | dict", allocations: list[dict] | None = None) -> dict:
 	"""Map an SLE to fact fields — declared data only, no derived valuation.
 

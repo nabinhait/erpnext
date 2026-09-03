@@ -162,6 +162,7 @@ def _refold(engine, policy, event_row: frappe._dict, args: dict, allow_negative_
 			"assert_qty",
 			"assert_rate",
 			"reverses_event",
+			"value_change",
 			"sle",
 		],
 		order_by="posting_datetime, name",
@@ -190,11 +191,14 @@ def _refold(engine, policy, event_row: frappe._dict, args: dict, allow_negative_
 			fields=["name", "voucher_type", "voucher_no", "posting_date", "stock_value_difference"],
 		)
 	}
-	for row in changed_rows:
-		if row.sle not in live:
+	start_value = 0.0
+	if window[0] > 0:
+		start_value = _equivalent_value(result.states[cint(rows[0].name)])
+	projections = _absorbed_projections(changed_rows, result, start_value)
+	for sle_name, projection in projections.items():
+		if sle_name not in live:
 			continue
-		effect = result.effects[cint(row.name)]
-		_project_sle(row.sle, result.states[cint(row.name)], effect, policy, engine)
+		_project_sle_values(sle_name, projection, policy, engine)
 
 	if is_tail:
 		# the window reaches the present, so latest state and checkpoint move
@@ -203,14 +207,66 @@ def _refold(engine, policy, event_row: frappe._dict, args: dict, allow_negative_
 		_save_state(engine, frappe._dict({**key, "name": last_id}), result.final)
 
 	if frappe.conf.get(GL_ADJUSTMENT_FLAG):
-		_post_gl_adjustment(args, event_row, changed_rows, result, live)
+		_post_gl_adjustment(args, event_row, projections, live)
 	elif frappe.conf.get(SUPPRESS_FLAG):
 		_regenerate_gl(args, event_row, live.values())
 
 	return REFOLDED
 
 
-def _post_gl_adjustment(args: dict, event_row: frappe._dict, rows: list, result, live: dict) -> None:
+def _equivalent_value(state) -> float:
+	return state.value - state.exposure_qty * state.exposure_rate
+
+
+def _absorbed_projections(rows: list, result, start_value: float) -> dict:
+	"""Per-SLE projection values with SLE-less events (revaluations) absorbed
+	into the preceding SLE row — the shape legacy books carry landed cost in."""
+	projections: dict[str, dict] = {}
+	prev_value = start_value
+	index, total = 0, len(rows)
+
+	while index < total and not rows[index].sle:
+		prev_value = _equivalent_value(result.states[cint(rows[index].name)])
+		index += 1
+
+	while index < total:
+		row = rows[index]
+		tail = index
+		while tail + 1 < total and not rows[tail + 1].sle:
+			tail += 1
+		state = result.states[cint(rows[tail].name)]
+		value = _equivalent_value(state)
+		projections[row.sle] = {
+			"qty_after": result.effects[cint(row.name)].qty_after,
+			"value": value,
+			"svd": value - prev_value,
+			"state": state,
+		}
+		prev_value = value
+		index = tail + 1
+
+	return projections
+
+
+def _project_sle_values(sle_name: str, projection: dict, policy, engine) -> None:
+	from erpnext.stock.services import stock_ledger_writer
+
+	state = projection["state"]
+	layered = isinstance(policy, engine.Fifo | engine.Lifo)
+	stock_queue = [[layer.qty, layer.rate] for layer in state.layers] if layered else []
+	stock_ledger_writer.set_fields(
+		sle_name,
+		{
+			"qty_after_transaction": projection["qty_after"],
+			"valuation_rate": state.valuation_rate,
+			"stock_value": projection["value"],
+			"stock_value_difference": projection["svd"],
+			"stock_queue": json.dumps(stock_queue),
+		},
+	)
+
+
+def _post_gl_adjustment(args: dict, event_row: frappe._dict, projections: dict, live: dict) -> None:
 	"""Append-only GL: never rewrite affected vouchers' postings.
 
 	The net svd deltas the refold caused are posted as fresh GL rows on the
@@ -230,12 +286,12 @@ def _post_gl_adjustment(args: dict, event_row: frappe._dict, rows: list, result,
 
 	current = (args.get("voucher_type"), args.get("voucher_no"))
 	deltas: dict[tuple[str, str], float] = {}
-	for row in rows:
-		stored = live.get(row.sle)
+	for sle_name, projection in projections.items():
+		stored = live.get(sle_name)
 		if stored is None or (stored.voucher_type, stored.voucher_no) == current:
 			continue
 
-		delta = flt(result.effects[cint(row.name)].value_delta) - flt(stored.stock_value_difference)
+		delta = flt(projection["svd"]) - flt(stored.stock_value_difference)
 		if abs(delta) < 0.005:
 			continue
 
@@ -311,7 +367,11 @@ def _refold_window(rows: list, event_row: frappe._dict) -> tuple[int, int]:
 
 	window_start_id = cint(rows[start].name)
 	for row in rows[start:end]:
-		if row.kind == "Reversal" and row.reverses_event and cint(row.reverses_event) < window_start_id:
+		if (
+			row.kind in ("Reversal", "Revaluation")
+			and row.reverses_event
+			and cint(row.reverses_event) < window_start_id
+		):
 			return (0, len(rows))
 
 	return (start, end)
@@ -367,6 +427,112 @@ def _key_has_bundles(key: dict) -> bool:
 	)
 
 
+def revalue(
+	item_code: str,
+	warehouse: str,
+	source_event: int,
+	value_change: float,
+	voucher_type: str,
+	voucher_no: str,
+) -> str | None:
+	"""Apply a cost revision (landed cost) as a Revaluation fact and refold.
+
+	Returns REFOLDED when the fold handled it; None means the caller must run
+	the legacy landed-cost machinery instead (lot-tracked key, incomplete
+	history, flags off)."""
+	if not (frappe.conf.get(FLAG) and frappe.conf.get("stock_event_dual_write")):
+		return None
+
+	from erpnext.stock.services import stock_engine_bridge, stock_event_emitter
+
+	engine = stock_engine_bridge.engine()
+	policy = _policy_for(engine, item_code)
+	if policy is None:
+		return None
+
+	source = frappe.db.get_value(
+		"Stock Event",
+		source_event,
+		["name", "item_code", "warehouse", "company", "posting_datetime", "voucher_type", "voucher_no"],
+		as_dict=1,
+	)
+	if not source or source.item_code != item_code or source.warehouse != warehouse:
+		return None
+
+	emitted = stock_event_emitter.emit_revaluation(
+		item_code,
+		warehouse,
+		source.company,
+		source.posting_datetime,
+		source_event,
+		value_change,
+		voucher_type,
+		voucher_no,
+	)
+	event_row = frappe._dict(
+		name=emitted.name,
+		item_code=item_code,
+		warehouse=warehouse,
+		posting_datetime=emitted.posting_datetime,
+	)
+	# the source voucher's own GL correction is the caller's (it carries the
+	# expense account); exclude it from the generic downstream adjustments
+	args = {
+		"company": source.company,
+		"voucher_type": source.voucher_type,
+		"voucher_no": source.voucher_no,
+	}
+	outcome = _refold(engine, policy, event_row, args, allow_negative_stock=True)
+	if outcome is None:
+		frappe.db.delete("Stock Event", {"name": emitted.name})
+		return None
+
+	_record_outcome({"voucher_type": voucher_type, "voucher_no": voucher_no}, outcome)
+	return outcome
+
+
+def can_revalue(item_code: str, warehouse: str) -> bool:
+	"""Whether a cost revision on this key can take the fold path."""
+	if not (frappe.conf.get(FLAG) and frappe.conf.get("stock_event_dual_write")):
+		return False
+	if not (frappe.conf.get(SUPPRESS_FLAG) or frappe.conf.get(GL_ADJUSTMENT_FLAG)):
+		return False
+
+	from erpnext.stock.services import stock_engine_bridge
+
+	engine = stock_engine_bridge.engine()
+	if _policy_for(engine, item_code) is None:
+		return False
+	return _history_foldable({"item_code": item_code, "warehouse": warehouse}, allow_lots=False)
+
+
+def post_revaluation_gl(
+	company: str,
+	warehouse: str,
+	value_change: float,
+	posting_date: str,
+	voucher_type: str,
+	voucher_no: str,
+	credit_account: str,
+) -> None:
+	"""The source-side GL of a revaluation: stock up, expense account down,
+	carried on the revising voucher, dated at the revalued receipt."""
+	from erpnext.accounts.general_ledger import make_gl_entries
+	from erpnext.stock import get_warehouse_account_map
+
+	warehouse_account = (get_warehouse_account_map(company).get(warehouse) or {}).get("account")
+	if not warehouse_account:
+		return
+
+	args = {"voucher_type": voucher_type, "voucher_no": voucher_no, "company": company}
+	make_gl_entries(
+		[
+			_adjustment_row(args, warehouse_account, credit_account, value_change, posting_date),
+			_adjustment_row(args, credit_account, warehouse_account, -value_change, posting_date),
+		]
+	)
+
+
 def invalidate(item_code: str, warehouse: str) -> None:
 	"""Drop the key's checkpoint after a legacy rewrite; next fold rebuilds it."""
 	frappe.db.delete("Stock Fold State", {"item_code": item_code, "warehouse": warehouse})
@@ -394,6 +560,7 @@ def _event_row(sle_name: str | None) -> frappe._dict | None:
 			"assert_qty",
 			"assert_rate",
 			"reverses_event",
+			"value_change",
 			"sle",
 		],
 		limit=1,
@@ -464,6 +631,7 @@ def _rebuild(engine, event_row: frappe._dict) -> tuple:
 				"assert_qty",
 				"assert_rate",
 				"reverses_event",
+			"value_change",
 				"sle",
 			],
 			order_by="posting_datetime, name",

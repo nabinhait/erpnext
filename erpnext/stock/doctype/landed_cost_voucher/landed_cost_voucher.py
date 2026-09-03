@@ -439,6 +439,9 @@ class LandedCostVoucher(Document):
 
 		for d in self.get("purchase_receipts"):
 			doc = frappe.get_doc(d.receipt_document_type, d.receipt_document)
+			if self._apply_landed_cost_via_fold(doc):
+				continue
+
 			# update stock & gl entries for cancelled state of PR
 			doc.docstatus = 2
 			doc.update_stock_ledger(allow_negative_stock=True, via_landed_cost_voucher=True)
@@ -453,6 +456,87 @@ class LandedCostVoucher(Document):
 			else:
 				doc.make_gl_entries()
 			doc.repost_future_sle_and_gle(via_landed_cost_voucher=True)
+
+	def _apply_landed_cost_via_fold(self, doc) -> bool:
+		"""Apply this voucher's charges as Revaluation facts instead of the
+		cancel/recreate dance: the receipt's layers are uplifted at their own
+		instant, downstream consumption trues up in the refold, and the charge
+		posts as append-only GL on this voucher. All-or-nothing per receipt —
+		if any key cannot take the fold path, the whole receipt stays legacy."""
+		from erpnext.stock.services import stock_fold_authority
+
+		if doc.doctype != "Purchase Receipt":
+			return False
+
+		taxes_total = sum(flt(tax.amount) for tax in self.get("taxes"))
+		splits = [
+			(tax.expense_account, flt(tax.amount) / taxes_total)
+			for tax in self.get("taxes")
+			if flt(tax.amount)
+		]
+		if not splits or any(not account for account, _ in splits):
+			return False
+
+		sign = -1 if self.docstatus == 2 else 1
+		receipt_items = {row.name: row for row in doc.get("items")}
+		plan = []
+		for lcv_item in self.get("items"):
+			if lcv_item.receipt_document != doc.name:
+				continue
+			charges = flt(lcv_item.applicable_charges)
+			if not charges:
+				continue
+
+			item = receipt_items.get(lcv_item.purchase_receipt_item)
+			if not item or not item.warehouse:
+				return False
+			if not stock_fold_authority.can_revalue(item.item_code, item.warehouse):
+				return False
+
+			sle_name = frappe.db.get_value(
+				"Stock Ledger Entry",
+				{
+					"voucher_type": doc.doctype,
+					"voucher_no": doc.name,
+					"voucher_detail_no": item.name,
+					"warehouse": item.warehouse,
+					"is_cancelled": 0,
+					"actual_qty": (">", 0),
+				},
+				"name",
+			)
+			source_event = frappe.db.get_value("Stock Event", {"sle": sle_name}, "name") if sle_name else None
+			if not source_event:
+				return False
+			plan.append((item, source_event, charges * sign))
+
+		if not plan:
+			return False
+
+		for item, source_event, delta in plan:
+			outcome = stock_fold_authority.revalue(
+				item.item_code, item.warehouse, source_event, delta, self.doctype, self.name
+			)
+			if outcome is None:
+				frappe.throw(
+					_(
+						"Could not apply landed cost for {0} in {1} through the stock engine; please retry."
+					).format(item.item_code, item.warehouse)
+				)
+			remaining = delta
+			for index, (account, fraction) in enumerate(splits):
+				portion = remaining if index == len(splits) - 1 else flt(delta * fraction, 2)
+				remaining = flt(remaining - portion, 6)
+				stock_fold_authority.post_revaluation_gl(
+					doc.company,
+					item.warehouse,
+					portion,
+					str(doc.posting_date),
+					self.doctype,
+					self.name,
+					account,
+				)
+		return True
 
 	def validate_asset_qty_and_status(self, receipt_document_type, receipt_document):
 		for item in self.get("items"):

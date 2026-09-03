@@ -210,6 +210,7 @@ def _event_rows(item_code: str, warehouse: str) -> list[frappe._dict]:
 			"assert_qty",
 			"assert_rate",
 			"reverses_event",
+			"value_change",
 			"sle",
 		],
 		order_by="posting_datetime, name",

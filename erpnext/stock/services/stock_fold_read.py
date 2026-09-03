@@ -202,6 +202,7 @@ def _events(engine, item_code: str, warehouse: str, after=None, upto=None) -> li
 			"assert_qty",
 			"assert_rate",
 			"reverses_event",
+			"value_change",
 			"sle",
 		],
 		order_by="posting_datetime, name",

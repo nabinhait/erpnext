@@ -15,6 +15,7 @@
   "assert_qty",
   "assert_rate",
   "reverses_event",
+  "value_change",
   "voucher_type",
   "voucher_no",
   "voucher_detail_no",
@@ -58,7 +59,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Kind",
-   "options": "Receipt\nIssue\nAssertion\nReversal",
+   "options": "Receipt\nIssue\nAssertion\nReversal\nRevaluation",
    "reqd": 1
   },
   {
@@ -85,10 +86,16 @@
    "label": "Assert Rate"
   },
   {
-   "depends_on": "eval:doc.kind == 'Reversal'",
+   "depends_on": "eval:['Reversal','Revaluation'].includes(doc.kind)",
    "fieldname": "reverses_event",
    "fieldtype": "Int",
    "label": "Reverses Event"
+  },
+  {
+   "depends_on": "eval:doc.kind == 'Revaluation'",
+   "fieldname": "value_change",
+   "fieldtype": "Float",
+   "label": "Value Change"
   },
   {
    "fieldname": "voucher_type",
@@ -138,7 +145,7 @@
  "in_create": 1,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-08-10 12:00:00.000000",
+ "modified": "2026-09-03 16:00:00.000000",
  "modified_by": "Administrator",
  "module": "Stock",
  "name": "Stock Event",
