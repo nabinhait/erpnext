@@ -104,3 +104,38 @@ class TestStockFoldRead(ERPNextTestSuite):
 		self.assertEqual(report["qty_matched"], 1)
 		self.assertEqual(report["value_matched"], 1, msg=str(report))
 		self.assertFalse(report["only_legacy_count"] or report["only_fold_count"])
+
+	def test_ledger_and_ageing_report_parity(self):
+		"""Fold ledger rows match stored values; fold ageing ages layers from
+		their source events."""
+		from erpnext.stock.services import report_parity
+
+		item = make_item(properties={"is_stock_item": 1}).name
+		warehouse = create_warehouse("Fold Ledger WH")
+
+		frappe.conf.stock_event_dual_write = 1
+		frappe.conf.stock_fold_authoritative = 1
+		try:
+			make_stock_entry(
+				item_code=item, target=warehouse, qty=10, rate=100, posting_date=add_days(today(), -40)
+			)
+			make_stock_entry(item_code=item, source=warehouse, qty=4, posting_date=add_days(today(), -20))
+			make_stock_entry(
+				item_code=item, target=warehouse, qty=6, rate=120, posting_date=add_days(today(), -5)
+			)
+
+			ledger = report_parity.stock_ledger(
+				"_Test Company", add_days(today(), -60), today(), warehouse=warehouse
+			)
+			ageing = report_parity.stock_ageing("_Test Company", today(), warehouse=warehouse)
+		finally:
+			frappe.conf.pop("stock_fold_authoritative", None)
+			frappe.conf.pop("stock_event_dual_write", None)
+
+		self.assertEqual(ledger["rows"], 3)
+		self.assertEqual(ledger["qty_matched"], 3)
+		self.assertEqual(ledger["value_matched"], 3, msg=str(ledger))
+
+		self.assertEqual(ageing["compared"], 1)
+		self.assertEqual(ageing["qty_matched"], 1)
+		self.assertEqual(ageing["age_within_5d"], 1, msg=str(ageing))

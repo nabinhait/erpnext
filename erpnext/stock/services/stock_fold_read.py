@@ -45,13 +45,26 @@ def ledger_rows(item_code: str, warehouse: str, from_dt: str, to_dt: str) -> lis
 	events = _events(engine, item_code, warehouse, after=from_dt, upto=to_dt)
 	result = engine.replay(events, engine.FoldContext(policy=_policy(engine, item_code)), start=opening)
 
+	meta = {
+		cint(row.name): row
+		for row in frappe.get_all(
+			"Stock Event",
+			filters={"name": ("in", [event.id for event in events])},
+			fields=["name", "voucher_type", "voucher_no", "voucher_detail_no", "sle"],
+		)
+	} if events else {}
+
 	rows = []
 	for event in sorted(events, key=lambda e: e.sort_key):
 		effect = result.effects[event.id]
 		state = result.states[event.id]
+		info = meta.get(event.id) or frappe._dict()
 		rows.append(
 			{
 				"event": event.id,
+				"voucher_type": info.get("voucher_type"),
+				"voucher_no": info.get("voucher_no"),
+				"sle": info.get("sle"),
 				"posting_datetime": event.posting_datetime,
 				"kind": event.kind.value,
 				"qty_change": event.qty_change,

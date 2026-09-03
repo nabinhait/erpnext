@@ -108,3 +108,97 @@ def _index(rows) -> dict:
 		if key[0] and key[1]:
 			indexed[key] = row
 	return indexed
+
+
+def stock_ledger(company: str, from_date: str, to_date: str, warehouse: str | None = None, item_code: str | None = None) -> dict:
+	"""Row-level parity: fold ledger rows vs stored SLE values, joined by SLE."""
+	from erpnext.stock.report.stock_ledger_fold.stock_ledger_fold import execute as fold_execute
+
+	filters = frappe._dict(company=company, from_date=from_date, to_date=to_date)
+	if warehouse:
+		filters.warehouse = warehouse
+	if item_code:
+		filters.item_code = item_code
+
+	fold_rows = [row for row in fold_execute(frappe._dict(filters))[1] if row.get("sle")]
+	stored = {}
+	if fold_rows:
+		for row in frappe.get_all(
+			"Stock Ledger Entry",
+			filters={"name": ("in", [row["sle"] for row in fold_rows])},
+			fields=["name", "qty_after_transaction", "stock_value"],
+		):
+			stored[row.name] = row
+
+	report = {"rows": len(fold_rows), "qty_matched": 0, "value_matched": 0, "mismatches": []}
+	for row in fold_rows:
+		legacy = stored.get(row["sle"])
+		if not legacy:
+			continue
+		qty_ok = abs(flt(legacy.qty_after_transaction) - flt(row["qty_after_transaction"])) <= QTY_TOLERANCE
+		value_ok = abs(flt(legacy.stock_value) - flt(row["stock_value"])) <= VALUE_TOLERANCE
+		report["qty_matched"] += 1 if qty_ok else 0
+		report["value_matched"] += 1 if value_ok else 0
+		if not (qty_ok and value_ok) and len(report["mismatches"]) < MAX_EXAMPLES:
+			report["mismatches"].append(
+				{
+					"sle": row["sle"],
+					"stored_qty": flt(legacy.qty_after_transaction),
+					"fold_qty": flt(row["qty_after_transaction"]),
+					"stored_value": flt(legacy.stock_value),
+					"fold_value": flt(row["stock_value"]),
+				}
+			)
+	return report
+
+
+def stock_ageing(company: str, to_date: str, warehouse: str | None = None) -> dict:
+	"""Key-level parity: fold ageing vs legacy ageing, arbitrated on quantity."""
+	from erpnext.stock.report.stock_ageing.stock_ageing import execute as legacy_execute
+	from erpnext.stock.report.stock_ageing_fold.stock_ageing_fold import execute as fold_execute
+
+	filters = frappe._dict(
+		company=company,
+		to_date=to_date,
+		range1=30,
+		range2=60,
+		range3=90,
+		range="30, 60, 90",
+		show_warehouse_wise_stock=1,
+	)
+	if warehouse:
+		filters.warehouse = warehouse
+
+	legacy_columns, legacy_raw = legacy_execute(frappe._dict(filters))[:2]
+	fieldnames = [column.get("fieldname") for column in legacy_columns]
+	legacy_rows = _index(
+		[dict(zip(fieldnames, row, strict=False)) if isinstance(row, (list, tuple)) else row for row in legacy_raw]
+	)
+	fold_rows = _index(fold_execute(frappe._dict(filters))[1])
+
+	report = {
+		"legacy_rows": len(legacy_rows),
+		"fold_rows": len(fold_rows),
+		"compared": 0,
+		"qty_matched": 0,
+		"age_within_5d": 0,
+		"mismatches": [],
+	}
+	for key in sorted(set(legacy_rows) & set(fold_rows)):
+		legacy, fold = legacy_rows[key], fold_rows[key]
+		report["compared"] += 1
+		if abs(flt(legacy.get("qty")) - flt(fold.get("qty"))) <= QTY_TOLERANCE:
+			report["qty_matched"] += 1
+		if abs(flt(legacy.get("average_age")) - flt(fold.get("average_age"))) <= 5:
+			report["age_within_5d"] += 1
+		elif len(report["mismatches"]) < MAX_EXAMPLES:
+			report["mismatches"].append(
+				{
+					"key": key,
+					"legacy_age": flt(legacy.get("average_age")),
+					"fold_age": flt(fold.get("average_age")),
+					"legacy_qty": flt(legacy.get("qty")),
+					"fold_qty": flt(fold.get("qty")),
+				}
+			)
+	return report
