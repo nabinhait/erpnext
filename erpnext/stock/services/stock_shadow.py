@@ -252,6 +252,11 @@ def _match_hybrid(rows, agg_result, lot_result, legacy, value_tolerance):
 		if stored is None:
 			continue
 		lot_value = _legacy_equivalent_value(lot_result.states[cint(row.name)])
+		if row.kind == "Assertion":
+			# a reconciliation snaps the stored balance to the count, resetting
+			# the seeded gap — recalibrate here and nowhere else
+			offset = flt(stored.stock_value) - lot_value
+			continue
 		if abs(lot_value + offset - flt(stored.stock_value)) > band:
 			return None
 
