@@ -162,16 +162,21 @@ def _closing_balances(company: str, moment: str) -> list[frappe._dict]:
 
 
 def _key_seeds(balance: frappe._dict, report: dict) -> list[frappe._dict]:
-	"""Lot sub-states to seed: live serials, and batches in valuation.
+	"""Lot sub-states to seed: batches in valuation only.
 
-	All-or-nothing per key: if the lots claim more quantity than legacy's
-	balance holds (drifted batch data), the whole key freezes pool-only."""
+	Serials never seed sub-states — they are quantity tags whose rate is
+	derived from facts (serial-wise valuation model, §2.6); their quantity
+	rides the pool at assert_rate. All-or-nothing per key: if the lots claim
+	more quantity than legacy's balance holds (drifted batch data), the whole
+	key freezes pool-only."""
 	if flt(balance.qty) <= 0 or not _lot_tracked(balance.item_code):
 		return []
 
 	seeds = []
 	for row in _live_lots(balance.item_code, balance.warehouse):
-		if row.batch_no and not row.serial_no and not _batch_in_valuation(row.batch_no):
+		if row.serial_no:
+			continue
+		if row.batch_no and not _batch_in_valuation(row.batch_no):
 			continue
 		rate = flt(row.in_value) / flt(row.in_qty) if flt(row.in_qty) else 0.0
 		seeds.append(frappe._dict(serial_no=row.serial_no, batch_no=row.batch_no, qty=row.qty, rate=rate))

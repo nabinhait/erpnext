@@ -244,6 +244,7 @@ class Item(Document):
 		self.validate_auto_reorder_enabled_in_stock_settings()
 		self.cant_change()
 		self.validate_serialized_change_with_bundle()
+		self.validate_serialwise_valuation_change()
 		self.validate_standard_cost_change()
 		self.validate_item_tax_net_rate_range()
 
@@ -1147,6 +1148,22 @@ class Item(Document):
 				)
 
 			frappe.throw(msg, title=_("Linked with submitted documents"))
+
+	def validate_serialwise_valuation_change(self):
+		"""Serial-wise valuation cannot be enabled once serial numbers exist:
+		the item's history was costed at the item-warehouse rate, and flipping
+		would change consumption semantics mid-life."""
+		if self.is_new() or not self.has_value_changed("use_serialwise_valuation"):
+			return
+		if not self.use_serialwise_valuation:
+			return
+		if frappe.db.exists("Serial No", {"item_code": self.name}):
+			frappe.throw(
+				_(
+					"Serial-wise valuation cannot be enabled for {0}: serial numbers already exist against it."
+				).format(self.name),
+				title=_("Valuation Semantics Locked"),
+			)
 
 	def validate_serialized_change_with_bundle(self):
 		"""Block turning a serialized item non-serialized while any Serial and Batch Bundle still exists

@@ -166,6 +166,7 @@ def _refold(engine, policy, event_row: frappe._dict, args: dict, allow_negative_
 			filters=filters,
 			fields=[
 				"name",
+				"item_code",
 				"posting_datetime",
 				"kind",
 				"qty_change",
@@ -736,6 +737,7 @@ def _rebuild(engine, event_row: frappe._dict) -> tuple:
 				filters=filters,
 				fields=[
 					"name",
+					"item_code",
 					"posting_datetime",
 					"kind",
 					"qty_change",

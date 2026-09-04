@@ -69,6 +69,7 @@ def emit_for_sle(sle: "Document | dict", source: str = "Dual Write") -> frappe._
 			allocation.get("serial_no"),
 			allocation.get("batch_no"),
 			allocation.get("qty_change"),
+			allocation.get("declared_rate"),
 			timestamp,
 			timestamp,
 			"Administrator",
@@ -93,6 +94,7 @@ ALLOCATION_FIELDS = (
 	"serial_no",
 	"batch_no",
 	"qty_change",
+	"declared_rate",
 	"creation",
 	"modified",
 	"owner",
@@ -205,11 +207,17 @@ def _allocations(sle: "Document | dict") -> list[dict]:
 	entries = frappe.get_all(
 		"Serial and Batch Entry",
 		filters={"parent": bundle},
-		fields=["serial_no", "batch_no", "qty"],
+		fields=["serial_no", "batch_no", "qty", "incoming_rate"],
 		order_by="idx",
 	)
 	rows = [
-		{"serial_no": row.serial_no, "batch_no": row.batch_no, "qty_change": flt(row.qty)} for row in entries
+		{
+			"serial_no": row.serial_no,
+			"batch_no": row.batch_no,
+			"qty_change": flt(row.qty),
+			"declared_rate": flt(row.incoming_rate),
+		}
+		for row in entries
 	]
 	# a cancellation's SLE reuses the original bundle, so entry signs carry the
 	# bundle's direction; the SLE dictates the movement's — flip when opposed

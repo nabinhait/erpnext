@@ -216,6 +216,7 @@ def _events(engine, item_code: str, warehouse: str, after=None, upto=None) -> li
 		filters=filters,
 		fields=[
 			"name",
+			"item_code",
 			"posting_datetime",
 			"kind",
 			"qty_change",

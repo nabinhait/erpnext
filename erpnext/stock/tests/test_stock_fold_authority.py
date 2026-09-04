@@ -409,6 +409,80 @@ class TestStockFoldAuthority(ERPNextTestSuite):
 		unowned = stock_fold_cutover.freeze_baseline(company)
 		self.assertEqual(str(_latest_baseline(key)), unowned["moment"])
 
+	def test_serialwise_valuation_flag(self):
+		"""use_serialwise_valuation on: picked units leave at their own receipt
+		rates via rate buckets, with no serial sub-states in the fold. Off:
+		mass-serialized goods cost the pool rate. Enabling with existing
+		serials is blocked."""
+		company = "_Test Company with perpetual inventory"
+		warehouse = create_warehouse("Serialwise WH", company=company)
+
+		def serial_item(flag: int) -> str:
+			return make_item(
+				properties={
+					"is_stock_item": 1,
+					"has_serial_no": 1,
+					"serial_no_series": f"SWV{flag}-.#####",
+					"valuation_method": "Moving Average",
+					"use_serialwise_valuation": flag,
+				}
+			).name
+
+		def picked_serials(voucher: str) -> list[str]:
+			bundle = frappe.db.get_value(
+				"Stock Ledger Entry",
+				{"voucher_no": voucher, "is_cancelled": 0, "actual_qty": (">", 0)},
+				"serial_and_batch_bundle",
+			)
+			return frappe.get_all("Serial and Batch Entry", {"parent": bundle}, pluck="serial_no")
+
+		previous = frappe.db.get_single_value(
+			"Stock Settings", "auto_create_serial_and_batch_bundle_for_outward"
+		)
+		frappe.db.set_single_value("Stock Settings", "auto_create_serial_and_batch_bundle_for_outward", 1)
+		frappe.conf.stock_event_dual_write = 1
+		frappe.conf.stock_fold_authoritative = 1
+		try:
+			serialwise, massgoods = serial_item(1), serial_item(0)
+			differences = {}
+			# serialwise: the two picked @70 units leave at 70 (-140);
+			# massgoods: the same pick costs the MA pool blend 290/5 = 58 (-116)
+			for item, expected in ((serialwise, -140), (massgoods, -116)):
+				make_stock_entry(item_code=item, target=warehouse, qty=3, basic_rate=50, company=company)
+				second = make_stock_entry(
+					item_code=item, target=warehouse, qty=2, basic_rate=70, company=company
+				)
+				issue = make_stock_entry(
+					item_code=item,
+					source=warehouse,
+					qty=2,
+					serial_no=picked_serials(second.name),
+					company=company,
+				)
+				differences[item] = (expected, issue.name)
+
+			for item, (expected, issue_name) in differences.items():
+				difference = frappe.db.get_value(
+					"Stock Ledger Entry",
+					{"voucher_no": issue_name, "is_cancelled": 0},
+					"stock_value_difference",
+				)
+				self.assertAlmostEqual(flt(difference), expected, places=2, msg=item)
+				state = frappe.db.get_value(
+					"Stock Fold State", {"item_code": item, "warehouse": warehouse}, "state_json"
+				)
+				self.assertEqual(json.loads(state)["lots"], [], msg=item)
+		finally:
+			frappe.conf.pop("stock_fold_authoritative", None)
+			frappe.conf.pop("stock_event_dual_write", None)
+			frappe.db.set_single_value(
+				"Stock Settings", "auto_create_serial_and_batch_bundle_for_outward", previous
+			)
+
+		locked = frappe.get_doc("Item", massgoods)
+		locked.use_serialwise_valuation = 1
+		self.assertRaises(frappe.ValidationError, locked.save)
+
 	def test_frozen_baseline_settles_legacy_negative_cleanly(self):
 		"""Freeze-the-past: legacy's negative-stock math stays exactly as
 		written behind the baseline; the frozen negative becomes modelled

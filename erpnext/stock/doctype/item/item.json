@@ -97,6 +97,7 @@
   "sample_quantity",
   "column_break_37",
   "has_serial_no",
+  "use_serialwise_valuation",
   "serial_no_series",
   "variants_section",
   "variant_of",
@@ -519,6 +520,15 @@
    "label": "Has Serial No",
    "oldfieldname": "has_serial_no",
    "oldfieldtype": "Select",
+   "show_description_on_click": 1
+  },
+  {
+   "default": "1",
+   "depends_on": "has_serial_no",
+   "description": "Each unit leaves stock at its own receipt cost (specific identification). Uncheck for mass-serialized goods that should be valued at the item-warehouse rate. Cannot be enabled once serial numbers exist for this item.",
+   "fieldname": "use_serialwise_valuation",
+   "fieldtype": "Check",
+   "label": "Use Serial-wise Valuation",
    "show_description_on_click": 1
   },
   {
