@@ -83,7 +83,9 @@ def write_valuation(sle: dict) -> None:
 	if frappe.conf.get("stock_fold_authoritative"):
 		from erpnext.stock.services import stock_fold_authority
 
-		stock_fold_authority.invalidate(sle.get("item_code"), sle.get("warehouse"))
+		stock_fold_authority.invalidate(
+			sle.get("item_code"), sle.get("warehouse"), sle.get("posting_datetime")
+		)
 
 
 @authorized_writer

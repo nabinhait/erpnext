@@ -228,6 +228,13 @@ def _refold(engine, policy, event_row: frappe._dict, args: dict, allow_negative_
 		last_id = max(cint(row.name) for row in rows)
 		_save_state(engine, frappe._dict({**key, "name": last_id}), result.final)
 
+	# history changed at this instant: checkpoints photographed at or after it
+	# are stale and must never seed a read; they rebuild at the next closing
+	# or scheduled run
+	frappe.db.delete(
+		"Stock Fold Checkpoint", {**key, "as_of": (">=", str(event_row.posting_datetime))}
+	)
+
 	if frappe.conf.get(GL_ADJUSTMENT_FLAG):
 		if not args.get("skip_gl_adjustment"):
 			_post_gl_adjustment(args, event_row, projections, live)
@@ -622,9 +629,17 @@ def post_revaluation_gl(
 	)
 
 
-def invalidate(item_code: str, warehouse: str) -> None:
-	"""Drop the key's checkpoint after a legacy rewrite; next fold rebuilds it."""
-	frappe.db.delete("Stock Fold State", {"item_code": item_code, "warehouse": warehouse})
+def invalidate(item_code: str, warehouse: str, from_datetime=None) -> None:
+	"""Drop the key's fold state after a legacy rewrite, plus every checkpoint
+	photographed at or after the rewritten instant (all of them when the
+	instant is unknown). Stale photographs must never seed a read; both
+	artifacts rebuild lazily from facts."""
+	key = {"item_code": item_code, "warehouse": warehouse}
+	frappe.db.delete("Stock Fold State", key)
+	checkpoint_filters = dict(key)
+	if from_datetime:
+		checkpoint_filters["as_of"] = (">=", str(from_datetime))
+	frappe.db.delete("Stock Fold Checkpoint", checkpoint_filters)
 
 
 def _event_row(sle_name: str | None) -> frappe._dict | None:

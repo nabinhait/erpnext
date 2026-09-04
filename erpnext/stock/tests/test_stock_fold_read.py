@@ -14,6 +14,45 @@ from erpnext.tests.utils import ERPNextTestSuite
 
 
 class TestStockFoldRead(ERPNextTestSuite):
+	def test_backdate_invalidates_stale_checkpoints(self):
+		"""A refold rewrites history after the insertion point, so checkpoints
+		photographed at or after it are deleted — a read must fold fresh facts,
+		never resume from a pre-backdate photograph."""
+		item = make_item(properties={"is_stock_item": 1}).name
+		warehouse = create_warehouse("Fold Read Backdate WH")
+		filters = {"item_code": item, "warehouse": warehouse}
+
+		frappe.conf.stock_event_dual_write = 1
+		frappe.conf.stock_fold_authoritative = 1
+		try:
+			make_stock_entry(
+				item_code=item, target=warehouse, qty=10, rate=50, posting_date=add_days(today(), -10)
+			)
+			make_stock_entry(item_code=item, source=warehouse, qty=2, posting_date=add_days(today(), -4))
+
+			closing = frappe.get_doc(
+				doctype="Stock Closing Entry",
+				company="_Test Company",
+				from_date=add_days(today(), -30),
+				to_date=add_days(today(), -3),
+			)
+			with patch("erpnext.stock.doctype.stock_closing_entry.stock_closing_entry.enqueue"):
+				closing.submit()
+			closing.create_stock_closing_balance_entries()
+			self.assertTrue(frappe.db.exists("Stock Fold Checkpoint", filters))
+
+			make_stock_entry(
+				item_code=item, target=warehouse, qty=10, rate=60, posting_date=add_days(today(), -5)
+			)
+		finally:
+			frappe.conf.pop("stock_fold_authoritative", None)
+			frappe.conf.pop("stock_event_dual_write", None)
+
+		self.assertFalse(frappe.db.exists("Stock Fold Checkpoint", filters))
+		state = stock_fold_read.state_as_of(item, warehouse, add_days(today(), -3) + " 23:59:59")
+		self.assertAlmostEqual(state.qty, 18, places=4)
+		self.assertAlmostEqual(state.value, 8 * 50 + 10 * 60, places=4)
+
 	def test_checkpoint_resume_equals_full_replay(self):
 		"""A read from the nearest checkpoint plus the folded tail must equal a
 		fold of the whole history — and ledger rows carry correct running values."""
