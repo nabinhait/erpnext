@@ -78,6 +78,13 @@ def to_event(
 		allocations = None
 	if allocations and honor_batch_flag:
 		allocations = [a for a in allocations if a.serial_no or _batch_in_valuation(a.batch_no)]
+	if allocations:
+		# stored rows from before the emitter aligned bundle-sourced signs may
+		# oppose the event: the allocation names the lot, the event dictates
+		# the direction
+		total = sum(flt(a.qty_change) for a in allocations)
+		if total * flt(row.qty_change) < 0:
+			allocations = [frappe._dict({**a, "qty_change": -flt(a.qty_change)}) for a in allocations]
 
 	return eng.Event(
 		id=cint(row.name),

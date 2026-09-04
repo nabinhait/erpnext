@@ -208,9 +208,16 @@ def _allocations(sle: "Document | dict") -> list[dict]:
 		fields=["serial_no", "batch_no", "qty"],
 		order_by="idx",
 	)
-	return [
+	rows = [
 		{"serial_no": row.serial_no, "batch_no": row.batch_no, "qty_change": flt(row.qty)} for row in entries
 	]
+	# a cancellation's SLE reuses the original bundle, so entry signs carry the
+	# bundle's direction; the SLE dictates the movement's — flip when opposed
+	total = sum(row["qty_change"] for row in rows)
+	if total * flt(sle.get("actual_qty")) < 0:
+		for row in rows:
+			row["qty_change"] = -row["qty_change"]
+	return rows
 
 
 def _field_allocations(sle: "Document | dict") -> list[dict]:
