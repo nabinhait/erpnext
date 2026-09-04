@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import frappe
 from frappe.core.doctype.user_permission.test_user_permission import create_user
-from frappe.utils import add_days, add_months, get_first_day, get_last_day, nowdate, today
+from frappe.utils import add_days, nowdate, today
 
 from erpnext.stock.doctype.item.test_item import make_item
 from erpnext.stock.doctype.stock_closing_entry.stock_closing_entry import StockClosing
@@ -132,45 +132,31 @@ class TestStockClosingEntryDuplicate(ERPNextTestSuite):
 		self.assertTrue(frappe.db.exists("Stock Closing Entry", later.name))
 
 
-class TestScheduledStockClosingEntry(ERPNextTestSuite):
-	def test_monthly_auto_creation(self):
-		"""The monthly job creates one submitted entry per company for the previous
-		month, only when opted in, and never a duplicate."""
-		from erpnext.stock.doctype.stock_closing_entry.stock_closing_entry import (
-			create_monthly_stock_closing_entries,
-		)
+class TestScheduledFoldCheckpoints(ERPNextTestSuite):
+	def test_scheduled_checkpoints_need_no_closing_entry(self):
+		"""The monthly job cuts silent checkpoints — a performance artifact with
+		no closing entry and no locking power — and reruns create nothing new."""
+		from erpnext.stock.services import stock_fold_read
 
-		from_date = get_first_day(add_months(nowdate(), -1))
-		filters = {
-			"docstatus": 1,
-			"company": COMPANY,
-			"from_date": ("<=", get_last_day(from_date)),
-			"to_date": (">=", from_date),
-		}
-
-		def run_job():
-			with patch("erpnext.stock.doctype.stock_closing_entry.stock_closing_entry.enqueue"):
-				create_monthly_stock_closing_entries()
-
-		make_stock_entry(
-			item_code=make_item(properties={"is_stock_item": 1}).name,
-			to_warehouse=WAREHOUSE,
-			qty=1,
-			rate=10,
-			company=COMPANY,
-		)
-
-		baseline = frappe.db.count("Stock Closing Entry", filters)
+		item = make_item(properties={"is_stock_item": 1}).name
+		frappe.conf.stock_event_dual_write = 1
 		try:
-			frappe.db.set_single_value("Stock Settings", "auto_create_stock_closing_entry", 0)
-			run_job()
-			self.assertEqual(frappe.db.count("Stock Closing Entry", filters), baseline)
-
-			frappe.db.set_single_value("Stock Settings", "auto_create_stock_closing_entry", 1)
-			expected = baseline or 1
-			run_job()
-			self.assertEqual(frappe.db.count("Stock Closing Entry", filters), expected)
-			run_job()
-			self.assertEqual(frappe.db.count("Stock Closing Entry", filters), expected)
+			make_stock_entry(item_code=item, to_warehouse=WAREHOUSE, qty=1, rate=10, company=COMPANY)
 		finally:
-			frappe.db.set_single_value("Stock Settings", "auto_create_stock_closing_entry", 0)
+			frappe.conf.pop("stock_event_dual_write", None)
+
+		filters = {"item_code": item, "warehouse": WAREHOUSE}
+		created = stock_fold_read.create_checkpoints(COMPANY, nowdate())
+		self.assertGreaterEqual(created, 1)
+		checkpoint = frappe.db.get_value(
+			"Stock Fold Checkpoint", filters, ["stock_closing_entry", "last_event"], as_dict=1
+		)
+		self.assertFalse(checkpoint.stock_closing_entry)
+		self.assertTrue(checkpoint.last_event)
+
+		self.assertEqual(stock_fold_read.create_checkpoints(COMPANY, nowdate()), 0)
+		self.assertEqual(frappe.db.count("Stock Fold Checkpoint", filters), 1)
+		# the monthly wrapper (last month's end) is safe to run and creates
+		# nothing for keys whose activity is all newer
+		stock_fold_read.create_monthly_fold_checkpoints()
+		self.assertEqual(frappe.db.count("Stock Fold Checkpoint", filters), 1)

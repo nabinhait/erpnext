@@ -9,12 +9,8 @@ from frappe.desk.form.load import get_attachments
 from frappe.model.document import Document
 from frappe.utils import (
 	add_days,
-	add_months,
 	get_date_str,
-	get_first_day,
-	get_last_day,
 	get_link_to_form,
-	nowdate,
 	nowtime,
 	parse_json,
 )
@@ -216,7 +212,7 @@ class StockClosingEntry(Document):
 
 		from erpnext.stock.services import stock_fold_read
 
-		stock_fold_read.create_checkpoints(self)
+		stock_fold_read.create_checkpoints(self.company, self.to_date, closing_entry=self.name)
 
 	def get_prepared_data(self):
 		if attachments := get_attachments(self.doctype, self.name):
@@ -229,45 +225,6 @@ class StockClosingEntry(Document):
 			return parse_json(data)
 
 		return frappe._dict({})
-
-
-def create_monthly_stock_closing_entries():
-	"""Create and submit a Stock Closing Entry for the previous month, per company.
-
-	Scheduled monthly; opt-in via Stock Settings > Auto Create Stock Closing
-	Entry Monthly. Companies with an overlapping submitted entry or no stock
-	ledger are skipped.
-	"""
-	if not frappe.get_single_value("Stock Settings", "auto_create_stock_closing_entry"):
-		return
-
-	from_date = get_first_day(add_months(nowdate(), -1))
-	to_date = get_last_day(from_date)
-
-	for company in frappe.get_all("Company", pluck="name"):
-		if not frappe.db.exists("Stock Ledger Entry", {"company": company, "is_cancelled": 0}):
-			continue
-
-		if has_overlapping_closing_entry(company, from_date, to_date):
-			continue
-
-		closing_entry = frappe.get_doc(
-			doctype="Stock Closing Entry", company=company, from_date=from_date, to_date=to_date
-		)
-		closing_entry.flags.ignore_permissions = True
-		closing_entry.submit()
-
-
-def has_overlapping_closing_entry(company, from_date, to_date):
-	return frappe.db.exists(
-		"Stock Closing Entry",
-		{
-			"docstatus": 1,
-			"company": company,
-			"from_date": ("<=", to_date),
-			"to_date": (">=", from_date),
-		},
-	)
 
 
 def prepare_closing_stock_balance(name):

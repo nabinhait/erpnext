@@ -549,7 +549,7 @@ scheduler_events = {
 	"monthly_long": [
 		"erpnext.accounts.deferred_revenue.process_deferred_accounting",
 		"erpnext.accounts.utils.auto_create_exchange_rate_revaluation_monthly",
-		"erpnext.stock.doctype.stock_closing_entry.stock_closing_entry.create_monthly_stock_closing_entries",
+		"erpnext.stock.services.stock_fold_read.create_monthly_fold_checkpoints",
 	],
 }
 

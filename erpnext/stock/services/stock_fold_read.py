@@ -10,7 +10,12 @@ history depth stops mattering.
 
 	state_as_of(item_code, warehouse, as_of)   -> engine State
 	ledger_rows(item_code, warehouse, from_dt, to_dt) -> per-event running rows
-	create_checkpoints(closing_entry_doc)      -> one checkpoint per active key
+	create_checkpoints(company, to_date)       -> one checkpoint per active key
+
+Checkpoints are a pure performance artifact — disposable, no locking power
+(correctness comes from assertions and baselines). They are cut silently by
+the monthly scheduler and on Stock Closing Entry submit; the closing entry
+is the lock, the checkpoint is just the cache it leaves behind.
 """
 
 import json
@@ -77,18 +82,31 @@ def ledger_rows(item_code: str, warehouse: str, from_dt: str, to_dt: str) -> lis
 	return rows
 
 
-def create_checkpoints(closing_entry) -> int:
-	"""One fold checkpoint per key active up to the closing's to_date.
+def create_monthly_fold_checkpoints() -> None:
+	"""Scheduled monthly: silent checkpoints at last month's end, per company.
+
+	Naturally idempotent — keys already checkpointed at that moment fold no
+	new events and are skipped, so reruns cost nothing."""
+	from frappe.utils import add_months, get_last_day, nowdate
+
+	to_date = get_last_day(add_months(nowdate(), -1))
+	for company in frappe.get_all("Company", pluck="name"):
+		if frappe.db.exists("Stock Event", {"company": company}):
+			create_checkpoints(company, to_date)
+
+
+def create_checkpoints(company: str, to_date, closing_entry: str | None = None) -> int:
+	"""One fold checkpoint per key active up to to_date's end.
 
 	Keys with no events since their previous checkpoint are skipped — reads
 	fall back to the older checkpoint, so sparse keys cost nothing per period.
 	"""
 	engine = stock_engine_bridge.engine()
-	as_of = str(closing_entry.to_date) + " 23:59:59.999999"
+	as_of = str(to_date) + " 23:59:59.999999"
 	created = 0
 	buffer: list[dict] = []
 
-	for index, key in enumerate(_active_keys(closing_entry.company, as_of)):
+	for index, key in enumerate(_active_keys(company, as_of)):
 		checkpoint = _nearest_checkpoint(key.item_code, key.warehouse, as_of)
 		after = checkpoint.as_of if checkpoint else None
 
@@ -112,7 +130,7 @@ def create_checkpoints(closing_entry) -> int:
 				"warehouse": key.warehouse,
 				"as_of": as_of,
 				"last_event": max(event.id for event in events),
-				"stock_closing_entry": closing_entry.name,
+				"stock_closing_entry": closing_entry,
 				"state_json": json.dumps(stock_engine_bridge.serialize_state(result.final)),
 			}
 		)
