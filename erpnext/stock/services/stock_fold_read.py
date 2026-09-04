@@ -222,11 +222,17 @@ def _events(engine, item_code: str, warehouse: str, after=None, upto=None) -> li
 			"reverses_event",
 			"value_change",
 			"sle",
+			"voucher_type",
+			"voucher_no",
 		],
 		order_by="posting_datetime, name",
 	)
 	if after:
 		rows = [row for row in rows if str(row.posting_datetime) > str(after)]
+
+	from erpnext.stock.services.stock_fold_authority import _drop_revoked_baselines
+
+	rows = _drop_revoked_baselines(rows)
 
 	bundle_backed = _bundle_backed({row.sle for row in rows if row.sle})
 	allocations = _allocations([row.name for row in rows])

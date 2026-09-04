@@ -33,6 +33,8 @@ EVENT_FIELDS = (
 	"assert_qty",
 	"assert_rate",
 	"value_change",
+	"voucher_type",
+	"voucher_no",
 	"source",
 	"creation",
 	"modified",
@@ -58,9 +60,13 @@ FLUSH_AT = 500
 TOLERANCE = 1e-6
 
 
-def freeze_baseline(company: str, moment: str | None = None) -> dict:
+def freeze_baseline(company: str, moment: str | None = None, closing_entry: str | None = None) -> dict:
 	"""Emit one baseline Assertion per key of the company, then invalidate
-	fold state so the next fold rebuilds from the baseline."""
+	fold state so the next fold rebuilds from the baseline.
+
+	With closing_entry, the baselines are owned by that Stock Closing Entry:
+	they lock only while it stays submitted — cancelling the closing revokes
+	them (the frontier model). Without it, the freeze is unconditional."""
 	moment = str(moment or frappe.utils.now_datetime())
 	timestamp = frappe.utils.now()
 	report = {
@@ -92,6 +98,8 @@ def freeze_baseline(company: str, moment: str | None = None) -> dict:
 				flt(balance.qty),
 				assert_rate,
 				0.0,
+				"Stock Closing Entry" if closing_entry else None,
+				closing_entry,
 				"Baseline",
 				timestamp,
 				timestamp,

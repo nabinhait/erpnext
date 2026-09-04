@@ -159,22 +159,26 @@ def _refold(engine, policy, event_row: frappe._dict, args: dict, allow_negative_
 	filters = dict(key)
 	if baseline:
 		filters["posting_datetime"] = (">=", str(baseline))
-	rows = frappe.get_all(
-		"Stock Event",
-		filters=filters,
-		fields=[
-			"name",
-			"posting_datetime",
-			"kind",
-			"qty_change",
-			"declared_rate",
-			"assert_qty",
-			"assert_rate",
-			"reverses_event",
-			"value_change",
-			"sle",
-		],
-		order_by="posting_datetime, name",
+	rows = _drop_revoked_baselines(
+		frappe.get_all(
+			"Stock Event",
+			filters=filters,
+			fields=[
+				"name",
+				"posting_datetime",
+				"kind",
+				"qty_change",
+				"declared_rate",
+				"assert_qty",
+				"assert_rate",
+				"reverses_event",
+				"value_change",
+				"sle",
+				"voucher_type",
+				"voucher_no",
+			],
+			order_by="posting_datetime, name",
+		)
 	)
 
 	window = _refold_window(rows, event_row)
@@ -450,16 +454,35 @@ def _history_foldable(key: dict, allow_lots: bool = False) -> bool:
 
 
 def _latest_baseline(key: dict) -> str | None:
-	return frappe.db.get_value(
+	"""The newest *active* baseline. A baseline linked to a Stock Closing Entry
+	is active only while that closing is submitted — cancelling the closing
+	revokes it and the frontier slides back to the previous baseline."""
+	rows = frappe.get_all(
 		"Stock Event",
-		{**key, "kind": "Assertion", "sle": ("is", "not set")},
-		"posting_datetime",
-		order_by="posting_datetime desc",
+		filters={**key, "kind": "Assertion", "sle": ("is", "not set")},
+		fields=["posting_datetime", "voucher_type", "voucher_no"],
+		order_by="posting_datetime desc, name desc",
 	)
+	for row in rows:
+		if _baseline_active(row):
+			return row.posting_datetime
+	return None
+
+
+def _baseline_active(row: frappe._dict) -> bool:
+	if not (row.voucher_type == "Stock Closing Entry" and row.voucher_no):
+		return True
+	return cint(frappe.db.get_value("Stock Closing Entry", row.voucher_no, "docstatus")) == 1
 
 
 def _is_baseline(row: frappe._dict) -> bool:
 	return row.kind == "Assertion" and not row.sle
+
+
+def _drop_revoked_baselines(rows: list) -> list:
+	"""A revoked baseline must not fold — replaying it would reset the key to
+	its stale pinned state. Active baselines and ordinary rows pass through."""
+	return [row for row in rows if not _is_baseline(row) or _baseline_active(row)]
 
 
 def _bundle_backed_sles(key: dict) -> set[str]:
@@ -691,22 +714,26 @@ def _rebuild(engine, event_row: frappe._dict) -> tuple:
 		filters["posting_datetime"] = (">=", str(baseline))
 	rows = [
 		row
-		for row in frappe.get_all(
-			"Stock Event",
-			filters=filters,
-			fields=[
-				"name",
-				"posting_datetime",
-				"kind",
-				"qty_change",
-				"declared_rate",
-				"assert_qty",
-				"assert_rate",
-				"reverses_event",
-			"value_change",
-				"sle",
-			],
-			order_by="posting_datetime, name",
+		for row in _drop_revoked_baselines(
+			frappe.get_all(
+				"Stock Event",
+				filters=filters,
+				fields=[
+					"name",
+					"posting_datetime",
+					"kind",
+					"qty_change",
+					"declared_rate",
+					"assert_qty",
+					"assert_rate",
+					"reverses_event",
+					"value_change",
+					"sle",
+					"voucher_type",
+					"voucher_no",
+				],
+				order_by="posting_datetime, name",
+			)
 		)
 		if cint(row.name) != cint(event_row.name)
 	]

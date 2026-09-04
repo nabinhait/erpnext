@@ -376,6 +376,39 @@ class TestStockFoldAuthority(ERPNextTestSuite):
 				"Stock Settings", "auto_create_serial_and_batch_bundle_for_outward", previous
 			)
 
+	def test_baseline_guard_follows_closing_entry_docstatus(self):
+		"""Frontier model: a baseline owned by a Stock Closing Entry locks only
+		while the closing stays submitted — cancelling the closing revokes it.
+		An unowned freeze remains an unconditional lock."""
+		from unittest.mock import patch
+
+		from erpnext.stock.services import stock_fold_cutover
+		from erpnext.stock.services.stock_fold_authority import _latest_baseline
+
+		company = "_Test Company with perpetual inventory"
+		item = make_item(properties={"is_stock_item": 1}).name
+		warehouse = create_warehouse("Frontier Guard WH", company=company)
+		key = {"item_code": item, "warehouse": warehouse}
+
+		make_stock_entry(item_code=item, target=warehouse, qty=5, basic_rate=80, company=company)
+
+		with patch("erpnext.stock.doctype.stock_closing_entry.stock_closing_entry.enqueue"):
+			closing = frappe.get_doc(
+				doctype="Stock Closing Entry",
+				company=company,
+				from_date=add_days(today(), -30),
+				to_date=today(),
+			)
+			closing.submit()
+		owned = stock_fold_cutover.freeze_baseline(company, closing_entry=closing.name)
+		self.assertEqual(str(_latest_baseline(key)), owned["moment"])
+
+		closing.cancel()
+		self.assertIsNone(_latest_baseline(key))
+
+		unowned = stock_fold_cutover.freeze_baseline(company)
+		self.assertEqual(str(_latest_baseline(key)), unowned["moment"])
+
 	def test_frozen_baseline_settles_legacy_negative_cleanly(self):
 		"""Freeze-the-past: legacy's negative-stock math stays exactly as
 		written behind the baseline; the frozen negative becomes modelled
