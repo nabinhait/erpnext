@@ -123,6 +123,9 @@ def create_checkpoints(company: str, to_date, closing_entry: str | None = None) 
 			continue
 
 		result = engine.replay(events, engine.FoldContext(policy=policy), start=start)
+		from erpnext.stock.services.stock_fold_authority import _warn_on_lot_cardinality
+
+		_warn_on_lot_cardinality(key, result.final)
 		buffer.append(
 			{
 				"name": frappe.generate_hash(length=10),

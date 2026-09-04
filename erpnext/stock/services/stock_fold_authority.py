@@ -31,6 +31,7 @@ GL_ADJUSTMENT_FLAG = "stock_fold_gl_adjustment"
 APPENDED = "appended"
 REFOLDED = "refolded"
 REFOLD_CAP = 20000
+LOT_CARDINALITY_GUARDRAIL = 5000
 
 
 def try_fold(args: dict, allow_negative_stock: bool = False) -> str | None:
@@ -831,6 +832,7 @@ def _project_bin(event_row: frappe._dict, final_state) -> None:
 def _save_state(engine, event_row: frappe._dict, state, checkpoint: str | None = None) -> None:
 	from erpnext.stock.services import stock_engine_bridge
 
+	_warn_on_lot_cardinality(event_row, state)
 	payload = {
 		"last_event": cint(event_row.name),
 		"state_json": json.dumps(stock_engine_bridge.serialize_state(state)),
@@ -854,3 +856,16 @@ def _save_state(engine, event_row: frappe._dict, state, checkpoint: str | None =
 		"modified_by": "Administrator",
 	}
 	frappe.db.bulk_insert("Stock Fold State", tuple(row), [list(row.values())])
+
+
+def _warn_on_lot_cardinality(event_row: frappe._dict, state) -> None:
+	"""The state blob is rewritten whole on every fold, so cost grows with the
+	number of valuation-participating lots. Announce the scale problem before
+	it hurts; the designed escape hatch is per-lot state rows (§2.6)."""
+	lots = len(state.lots)
+	if lots > LOT_CARDINALITY_GUARDRAIL:
+		frappe.logger("stock_fold").warning(
+			f"{event_row.item_code}/{event_row.warehouse} folds {lots} lot sub-states "
+			f"(guardrail {LOT_CARDINALITY_GUARDRAIL}); state blob rewrites are O(lots) — "
+			"consider quantity-tag semantics for this item or per-lot state storage"
+		)
