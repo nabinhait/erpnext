@@ -362,6 +362,13 @@ class TestStockFoldAuthority(ERPNextTestSuite):
 			)
 			self.assertEqual(flt(final.qty_after_transaction), 0)
 			self.assertAlmostEqual(flt(final.stock_value), 0, places=2)
+
+			# semantics are fixed at birth: the flag is set_only_once, so the
+			# save path rejects any post-insert flip (fold correctness depends
+			# on this — a flip would strand the batch's sub-fold money)
+			locked = frappe.get_doc("Batch", batches["NEW"])
+			locked.use_batchwise_valuation = 0
+			self.assertRaises(frappe.CannotChangeConstantError, locked.save)
 		finally:
 			frappe.conf.pop("stock_fold_authoritative", None)
 			frappe.conf.pop("stock_event_dual_write", None)
