@@ -409,6 +409,37 @@ class TestStockFoldAuthority(ERPNextTestSuite):
 		unowned = stock_fold_cutover.freeze_baseline(company)
 		self.assertEqual(str(_latest_baseline(key)), unowned["moment"])
 
+	def test_batch_rename_invalidates_memoized_state(self):
+		"""A forced batch rename rewrites Link columns but cannot reach the lot
+		ids memoized inside state blobs — so it must drop them; the next fold
+		rebuilds from facts, which carry the new name."""
+		company = "_Test Company with perpetual inventory"
+		item = make_item(
+			properties={
+				"is_stock_item": 1,
+				"has_batch_no": 1,
+				"create_new_batch": 1,
+				"batch_number_series": "RNM-.#####",
+			}
+		).name
+		warehouse = create_warehouse("Batch Rename WH", company=company)
+		key = {"item_code": item, "warehouse": warehouse}
+
+		frappe.conf.stock_event_dual_write = 1
+		frappe.conf.stock_fold_authoritative = 1
+		try:
+			make_stock_entry(item_code=item, target=warehouse, qty=5, basic_rate=40, company=company)
+		finally:
+			frappe.conf.pop("stock_fold_authoritative", None)
+			frappe.conf.pop("stock_event_dual_write", None)
+
+		self.assertTrue(frappe.db.exists("Stock Fold State", key))
+		batch = frappe.db.get_value("Stock Event Allocation", {"batch_no": ("like", "RNM-%")}, "batch_no")
+		renamed = frappe.rename_doc("Batch", batch, f"{batch}-RN", force=True)
+
+		self.assertFalse(frappe.db.exists("Stock Fold State", key))
+		self.assertTrue(frappe.db.exists("Stock Event Allocation", {"batch_no": renamed}))
+
 	def test_serialwise_valuation_flag(self):
 		"""use_serialwise_valuation on: picked units leave at their own receipt
 		rates via rate buckets, with no serial sub-states in the fold. Off:
