@@ -376,6 +376,61 @@ class TestStockFoldAuthority(ERPNextTestSuite):
 				"Stock Settings", "auto_create_serial_and_batch_bundle_for_outward", previous
 			)
 
+	def test_frozen_baseline_settles_legacy_negative_cleanly(self):
+		"""Freeze-the-past: legacy's negative-stock math stays exactly as
+		written behind the baseline; the frozen negative becomes modelled
+		exposure, and the next receipt settles it at true cost — the key is
+		clean from the first forward fold."""
+		from erpnext.stock.services import stock_fold_cutover
+
+		company = "_Test Company with perpetual inventory"
+		item = make_item(properties={"is_stock_item": 1, "valuation_method": "Moving Average"}).name
+		warehouse = create_warehouse("Freeze Baseline WH", company=company)
+
+		previous = frappe.db.get_single_value("Stock Settings", "allow_negative_stock")
+		frappe.db.set_single_value("Stock Settings", "allow_negative_stock", 1)
+		try:
+			make_stock_entry(item_code=item, target=warehouse, qty=5, basic_rate=80, company=company)
+			make_stock_entry(item_code=item, source=warehouse, qty=8, company=company)
+			frozen_era = self._valuation_rows(item, warehouse)
+
+			report = stock_fold_cutover.freeze_baseline(company)
+
+			frappe.conf.stock_event_dual_write = 1
+			frappe.conf.stock_fold_authoritative = 1
+			receipt = make_stock_entry(
+				item_code=item, target=warehouse, qty=10, basic_rate=100, company=company
+			)
+		finally:
+			frappe.conf.pop("stock_fold_authoritative", None)
+			frappe.conf.pop("stock_event_dual_write", None)
+			frappe.db.set_single_value("Stock Settings", "allow_negative_stock", previous)
+
+		self.assertGreaterEqual(report["keys"], 1)
+		self.assertGreaterEqual(report["negative"], 1)
+		baseline = frappe.db.get_value(
+			"Stock Event",
+			{"item_code": item, "warehouse": warehouse, "kind": "Assertion", "source": "Baseline"},
+			["assert_qty", "assert_rate"],
+			as_dict=1,
+		)
+		self.assertEqual(flt(baseline.assert_qty), -3)
+		self.assertAlmostEqual(flt(baseline.assert_rate), 80, places=4)
+
+		# the frozen era is byte-identical to what legacy wrote
+		self.assertEqual(self._valuation_rows(item, warehouse)[: len(frozen_era)], frozen_era)
+
+		# clean forward: 3 uncovered units caught up at 100, 7 on hand at 100
+		settled = frappe.db.get_value(
+			"Stock Ledger Entry",
+			{"voucher_no": receipt.name, "is_cancelled": 0},
+			["qty_after_transaction", "stock_value", "stock_value_difference"],
+			as_dict=1,
+		)
+		self.assertEqual(flt(settled.qty_after_transaction), 7)
+		self.assertAlmostEqual(flt(settled.stock_value), 700, places=2)
+		self.assertAlmostEqual(flt(settled.stock_value_difference), 940, places=2)
+
 	def test_lot_landed_cost_as_revaluation(self):
 		"""Batch- and serial-tracked LCVs take the fold path too: allocations fold
 		as lot sub-states, the revaluation uplifts the lots, and the books net

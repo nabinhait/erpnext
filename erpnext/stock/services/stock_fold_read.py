@@ -214,10 +214,17 @@ def _events(engine, item_code: str, warehouse: str, after=None, upto=None) -> li
 	allocations = _allocations([row.name for row in rows])
 	return [
 		stock_engine_bridge.to_event(
-			engine, row, allocations.get(str(row.name)) if row.sle in bundle_backed else None
+			engine,
+			row,
+			allocations.get(str(row.name)) if row.sle in bundle_backed or _is_baseline(row) else None,
 		)
 		for row in rows
 	]
+
+
+def _is_baseline(row: frappe._dict) -> bool:
+	"""An SLE-less assertion is a cutover baseline; its allocations seed lots."""
+	return row.kind == "Assertion" and not row.sle
 
 
 def _bundle_backed(sle_names: set) -> set:
@@ -238,7 +245,7 @@ def _allocations(event_names: list) -> dict[str, list[frappe._dict]]:
 	rows = frappe.get_all(
 		"Stock Event Allocation",
 		filters={"parent": ("in", [str(name) for name in event_names])},
-		fields=["parent", "serial_no", "batch_no", "qty_change"],
+		fields=["parent", "serial_no", "batch_no", "qty_change", "declared_rate"],
 		order_by="idx",
 	)
 	grouped: dict[str, list[frappe._dict]] = {}

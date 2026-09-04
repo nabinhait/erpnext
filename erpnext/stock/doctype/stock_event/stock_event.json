@@ -125,7 +125,7 @@
    "fieldname": "source",
    "fieldtype": "Select",
    "label": "Source",
-   "options": "Dual Write\nBackfill",
+   "options": "Dual Write\nBackfill\nBaseline",
    "read_only": 1
   },
   {

@@ -132,7 +132,7 @@ def _allocations(event_names: list) -> dict[str, list[frappe._dict]]:
 	rows = frappe.get_all(
 		"Stock Event Allocation",
 		filters={"parent": ("in", [str(name) for name in event_names])},
-		fields=["parent", "serial_no", "batch_no", "qty_change"],
+		fields=["parent", "serial_no", "batch_no", "qty_change", "declared_rate"],
 		order_by="idx",
 	)
 	grouped: dict[str, list[frappe._dict]] = {}
@@ -152,9 +152,16 @@ def _refold(engine, policy, event_row: frappe._dict, args: dict, allow_negative_
 	if not _history_foldable(key, allow_lots=True):
 		return None
 
+	baseline = _latest_baseline(key)
+	if baseline and str(event_row.posting_datetime) < str(baseline):
+		return None  # backdates into the frozen era stay legacy
+
+	filters = dict(key)
+	if baseline:
+		filters["posting_datetime"] = (">=", str(baseline))
 	rows = frappe.get_all(
 		"Stock Event",
-		filters=key,
+		filters=filters,
 		fields=[
 			"name",
 			"posting_datetime",
@@ -182,7 +189,9 @@ def _refold(engine, policy, event_row: frappe._dict, args: dict, allow_negative_
 	try:
 		events = [
 			stock_engine_bridge.to_event(
-				engine, row, allocations.get(str(row.name)) if row.sle in bundle_rows else None
+				engine,
+				row,
+				allocations.get(str(row.name)) if row.sle in bundle_rows or _is_baseline(row) else None,
 			)
 			for row in rows
 		]
@@ -421,19 +430,36 @@ def _regenerate_gl(args: dict, event_row: frappe._dict, live_sles) -> None:
 
 
 def _history_foldable(key: dict, allow_lots: bool = False) -> bool:
-	"""Complete event history, small enough for a sync fold, and — when the key
-	is lot-tracked — free of assertions (assertions reset the aggregate but
-	cannot reconstruct lots, so lot keys with reconciliations stay legacy)."""
-	events = frappe.db.count("Stock Event", key)
+	"""Complete event history since the last baseline (an SLE-less assertion
+	pinning legacy's stored balance — everything behind it is frozen), small
+	enough for a sync fold, and — when the key is lot-tracked — free of
+	reconciliations after that baseline (a legacy reco resets the aggregate
+	but cannot reconstruct lots; a baseline seeds them)."""
+	baseline = _latest_baseline(key)
+	since = {"posting_datetime": (">", str(baseline))} if baseline else {}
+	events = frappe.db.count("Stock Event", {**key, **since})
 	if events > REFOLD_CAP:
 		return False
-	if events < frappe.db.count("Stock Ledger Entry", {**key, "is_cancelled": 0}):
+	if events < frappe.db.count("Stock Ledger Entry", {**key, "is_cancelled": 0, **since}):
 		return False
 	if not _key_has_bundles(key):
 		return True
 	if not allow_lots:
 		return False
-	return not frappe.db.exists("Stock Event", {**key, "kind": "Assertion"})
+	return not frappe.db.exists("Stock Event", {**key, "kind": "Assertion", "sle": ("is", "set"), **since})
+
+
+def _latest_baseline(key: dict) -> str | None:
+	return frappe.db.get_value(
+		"Stock Event",
+		{**key, "kind": "Assertion", "sle": ("is", "not set")},
+		"posting_datetime",
+		order_by="posting_datetime desc",
+	)
+
+
+def _is_baseline(row: frappe._dict) -> bool:
+	return row.kind == "Assertion" and not row.sle
 
 
 def _bundle_backed_sles(key: dict) -> set[str]:
@@ -646,10 +672,12 @@ def _load_state(engine, event_row: frappe._dict) -> tuple:
 
 
 def _rebuild(engine, event_row: frappe._dict) -> tuple:
-	"""Replay the key's full event history (excluding the current event).
+	"""Replay the key's event history since its baseline (excluding the current
+	event).
 
-	Only valid when the history is complete — every live SLE of the key must
-	have an event; otherwise fold authority must not claim this key yet.
+	Only valid when that history is complete — every live SLE since the
+	baseline must have an event; otherwise fold authority must not claim this
+	key yet. History behind a baseline is frozen and never replayed.
 	"""
 	from erpnext.stock.services import stock_engine_bridge
 
@@ -657,11 +685,15 @@ def _rebuild(engine, event_row: frappe._dict) -> tuple:
 	if not _history_foldable(key, allow_lots=True):
 		return None, 0
 
+	baseline = _latest_baseline(key)
+	filters = dict(key)
+	if baseline:
+		filters["posting_datetime"] = (">=", str(baseline))
 	rows = [
 		row
 		for row in frappe.get_all(
 			"Stock Event",
-			filters=key,
+			filters=filters,
 			fields=[
 				"name",
 				"posting_datetime",
@@ -684,7 +716,9 @@ def _rebuild(engine, event_row: frappe._dict) -> tuple:
 	try:
 		events_list = [
 			stock_engine_bridge.to_event(
-				engine, row, allocations.get(str(row.name)) if row.sle in bundle_rows else None
+				engine,
+				row,
+				allocations.get(str(row.name)) if row.sle in bundle_rows or _is_baseline(row) else None,
 			)
 			for row in rows
 		]

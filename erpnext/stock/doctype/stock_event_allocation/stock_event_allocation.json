@@ -6,7 +6,8 @@
  "field_order": [
   "serial_no",
   "batch_no",
-  "qty_change"
+  "qty_change",
+  "declared_rate"
  ],
  "fields": [
   {
@@ -28,6 +29,12 @@
    "fieldtype": "Float",
    "in_list_view": 1,
    "label": "Qty Change"
+  },
+  {
+   "description": "Per-lot rate for baseline assertions and lot-priced receipts; 0 falls back to the event's rate",
+   "fieldname": "declared_rate",
+   "fieldtype": "Float",
+   "label": "Declared Rate"
   }
  ],
  "index_web_pages_for_search": 1,

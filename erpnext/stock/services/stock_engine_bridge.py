@@ -72,9 +72,11 @@ def to_event(
 		# best-effort pairing failed; fold it as the movement it is
 		kind = eng.EventKind.RECEIPT if flt(row.qty_change) > 0 else eng.EventKind.ISSUE
 
-	if kind is eng.EventKind.ASSERTION:
-		allocations = None  # engine assertions reset the whole key; lots reconverge from later facts
-	elif allocations and honor_batch_flag:
+	if kind is eng.EventKind.ASSERTION and row.sle:
+		# a legacy reco resets the whole key; lots reconverge from later facts.
+		# An SLE-less assertion is a cutover baseline: its allocations seed lots.
+		allocations = None
+	if allocations and honor_batch_flag:
 		allocations = [a for a in allocations if a.serial_no or _batch_in_valuation(a.batch_no)]
 
 	return eng.Event(
@@ -139,4 +141,5 @@ def _to_allocation(eng: frappe._dict, alloc: frappe._dict):
 		lot_type=lot_type,
 		lot_id=alloc.serial_no or alloc.batch_no,
 		qty=flt(alloc.qty_change),
+		declared_rate=flt(alloc.get("declared_rate")) or None,
 	)

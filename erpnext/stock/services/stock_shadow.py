@@ -285,7 +285,7 @@ def _allocations_by_event(event_names: list) -> dict[str, list[frappe._dict]]:
 	rows = frappe.get_all(
 		"Stock Event Allocation",
 		filters={"parent": ("in", [str(name) for name in event_names])},
-		fields=["parent", "serial_no", "batch_no", "qty_change"],
+		fields=["parent", "serial_no", "batch_no", "qty_change", "declared_rate"],
 		order_by="idx",
 	)
 	grouped: dict[str, list[frappe._dict]] = {}
