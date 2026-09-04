@@ -4,7 +4,7 @@
 import json
 
 import frappe
-from frappe.utils import add_days, today
+from frappe.utils import add_days, flt, today
 
 from erpnext.stock.doctype.item.test_item import make_item
 from erpnext.stock.doctype.stock_entry.stock_entry_utils import make_stock_entry
@@ -298,6 +298,76 @@ class TestStockFoldAuthority(ERPNextTestSuite):
 			frappe.conf.pop("stock_event_dual_write", None)
 
 		self.assertFalse(frappe.db.exists("Stock Fold State", {"item_code": item, "warehouse": warehouse}))
+
+	def test_mixed_batch_pools_never_borrow(self):
+		"""One key, two batches: a batchwise batch spends its own money, a
+		quantity-tag batch (flag off) costs the shared pool's rate, and full
+		stock-out closes at exactly zero — no residual value at zero qty."""
+		company = "_Test Company with perpetual inventory"
+		item = make_item(
+			properties={"is_stock_item": 1, "has_batch_no": 1, "valuation_method": "Moving Average"}
+		).name
+		warehouse = create_warehouse("Mixed Batch Pool WH", company=company)
+
+		batches = {}
+		for batch_id, flagged in (("OLD", 0), ("NEW", 1)):
+			batch = frappe.get_doc(
+				{"doctype": "Batch", "item": item, "batch_id": f"{item}-{batch_id}"}
+			).insert()
+			if not flagged:
+				batch.db_set("use_batchwise_valuation", 0)
+				frappe.clear_document_cache("Batch", batch.name)
+			batches[batch_id] = batch.name
+
+		previous = frappe.db.get_single_value(
+			"Stock Settings", "auto_create_serial_and_batch_bundle_for_outward"
+		)
+		frappe.db.set_single_value("Stock Settings", "auto_create_serial_and_batch_bundle_for_outward", 1)
+		frappe.conf.stock_event_dual_write = 1
+		frappe.conf.stock_fold_authoritative = 1
+		try:
+			moves = [
+				("OLD", 10, 50, None),
+				("NEW", 10, 70, None),
+				("NEW", -2, None, -140),
+				("OLD", -2, None, -100),  # pool rate 50, not the 58.89 whole-position blend
+				("OLD", -8, None, -400),
+				("NEW", -8, None, -560),
+			]
+			for batch_id, qty, rate, expected_difference in moves:
+				entry = make_stock_entry(
+					item_code=item,
+					target=warehouse if qty > 0 else None,
+					source=warehouse if qty < 0 else None,
+					qty=abs(qty),
+					basic_rate=rate,
+					batch_no=batches[batch_id],
+					company=company,
+				)
+				if expected_difference is None:
+					continue
+				difference = frappe.db.get_value(
+					"Stock Ledger Entry",
+					{"voucher_no": entry.name, "is_cancelled": 0},
+					"stock_value_difference",
+				)
+				self.assertAlmostEqual(flt(difference), expected_difference, places=2, msg=entry.name)
+
+			final = frappe.db.get_value(
+				"Stock Ledger Entry",
+				{"item_code": item, "warehouse": warehouse, "is_cancelled": 0},
+				["qty_after_transaction", "stock_value"],
+				order_by="posting_datetime desc, creation desc",
+				as_dict=1,
+			)
+			self.assertEqual(flt(final.qty_after_transaction), 0)
+			self.assertAlmostEqual(flt(final.stock_value), 0, places=2)
+		finally:
+			frappe.conf.pop("stock_fold_authoritative", None)
+			frappe.conf.pop("stock_event_dual_write", None)
+			frappe.db.set_single_value(
+				"Stock Settings", "auto_create_serial_and_batch_bundle_for_outward", previous
+			)
 
 	def test_lot_landed_cost_as_revaluation(self):
 		"""Batch- and serial-tracked LCVs take the fold path too: allocations fold

@@ -55,8 +55,18 @@ def policy_for(item_code: str, eng: frappe._dict | None = None):
 	return eng.Fifo()
 
 
-def to_event(eng: frappe._dict, row: frappe._dict, allocations: list[frappe._dict] | None = None):
-	"""Convert a Stock Event row (plus optional allocation rows) to an engine Event."""
+def to_event(
+	eng: frappe._dict,
+	row: frappe._dict,
+	allocations: list[frappe._dict] | None = None,
+	honor_batch_flag: bool = True,
+):
+	"""Convert a Stock Event row (plus optional allocation rows) to an engine Event.
+
+	With honor_batch_flag (the forward semantics), only serials and batches
+	with use_batchwise_valuation reach the fold as allocations; other batches
+	are quantity tags and their share folds against the key's shared pool.
+	Shadow and restatement trials pass False to replay history's own shape."""
 	kind = eng.EventKind(row.kind)
 	if row.kind == "Reversal" and not row.reverses_event:
 		# best-effort pairing failed; fold it as the movement it is
@@ -64,6 +74,8 @@ def to_event(eng: frappe._dict, row: frappe._dict, allocations: list[frappe._dic
 
 	if kind is eng.EventKind.ASSERTION:
 		allocations = None  # engine assertions reset the whole key; lots reconverge from later facts
+	elif allocations and honor_batch_flag:
+		allocations = [a for a in allocations if a.serial_no or _batch_in_valuation(a.batch_no)]
 
 	return eng.Event(
 		id=cint(row.name),
@@ -113,6 +125,12 @@ def deserialize_state(eng: frappe._dict, data: dict):
 			for lot in data["lots"]
 		),
 	)
+
+
+def _batch_in_valuation(batch_no: str | None) -> bool:
+	if not batch_no:
+		return False
+	return bool(frappe.get_cached_value("Batch", batch_no, "use_batchwise_valuation"))
 
 
 def _to_allocation(eng: frappe._dict, alloc: frappe._dict):

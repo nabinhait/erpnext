@@ -84,6 +84,7 @@ def run(
 					allocations.get(str(row.name))
 					if (legacy.get(row.sle) or {}).get("serial_and_batch_bundle")
 					else None,
+					honor_batch_flag=False,
 				)
 				for row in rows
 			]
@@ -100,7 +101,9 @@ def run(
 		if allocations and _has_misfits(rows, result, legacy, qty_tolerance, value_tolerance):
 			try:
 				lot_events = [
-					stock_engine_bridge.to_event(engine, row, allocations.get(str(row.name)))
+					stock_engine_bridge.to_event(
+						engine, row, allocations.get(str(row.name)), honor_batch_flag=False
+					)
 					for row in rows
 				]
 				lot_result = engine.replay(lot_events, engine.FoldContext(policy=policy))
@@ -341,7 +344,10 @@ def diagnose(item_code: str, warehouse: str, limit: int = 12) -> list[dict]:
 	policy = stock_engine_bridge.policy_for(item_code, engine)
 	rows = _event_rows(item_code, warehouse)
 	allocations = _allocations_by_event([row.name for row in rows])
-	events = [stock_engine_bridge.to_event(engine, row, allocations.get(str(row.name))) for row in rows]
+	events = [
+		stock_engine_bridge.to_event(engine, row, allocations.get(str(row.name)), honor_batch_flag=False)
+		for row in rows
+	]
 	result = engine.replay(events, engine.FoldContext(policy=policy))
 
 	legacy = {

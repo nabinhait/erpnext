@@ -41,7 +41,12 @@ def run(warehouses: list[str] | None = None, value_tolerance: float = 0.01) -> d
 				engine.FoldContext(policy=policy),
 			).final
 			lot_level = engine.replay(
-				[stock_engine_bridge.to_event(engine, row, allocations.get(str(row.name))) for row in rows],
+				[
+					stock_engine_bridge.to_event(
+						engine, row, allocations.get(str(row.name)), honor_batch_flag=False
+					)
+					for row in rows
+				],
 				engine.FoldContext(policy=policy),
 			).final
 		except ValueError as error:
