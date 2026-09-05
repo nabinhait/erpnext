@@ -16,30 +16,27 @@ from erpnext.stock.utils import get_valuation_method
 
 
 def engine() -> frappe._dict:
-	try:
-		from stock_engine.core.context import FoldContext
-		from stock_engine.core.event import Event, EventKind
-		from stock_engine.core.lots import Allocation, LotType
-		from stock_engine.core.policies import Fifo, Lifo, MovingAverage
-		from stock_engine.core.replay import replay
-		from stock_engine.core.state import Layer, LotState, State
+	from erpnext.stock.engine.context import FoldContext
+	from erpnext.stock.engine.event import Event, EventKind
+	from erpnext.stock.engine.lots import Allocation, LotType
+	from erpnext.stock.engine.policies import Fifo, Lifo, MovingAverage
+	from erpnext.stock.engine.replay import replay
+	from erpnext.stock.engine.state import Layer, LotState, State
 
-		return frappe._dict(
-			Event=Event,
-			EventKind=EventKind,
-			Allocation=Allocation,
-			LotType=LotType,
-			FoldContext=FoldContext,
-			Fifo=Fifo,
-			Lifo=Lifo,
-			MovingAverage=MovingAverage,
-			replay=replay,
-			Layer=Layer,
-			LotState=LotState,
-			State=State,
-		)
-	except ImportError:
-		frappe.throw("This feature requires the stock_engine app to be installed on this bench")
+	return frappe._dict(
+		Event=Event,
+		EventKind=EventKind,
+		Allocation=Allocation,
+		LotType=LotType,
+		FoldContext=FoldContext,
+		Fifo=Fifo,
+		Lifo=Lifo,
+		MovingAverage=MovingAverage,
+		replay=replay,
+		Layer=Layer,
+		LotState=LotState,
+		State=State,
+	)
 
 
 def policy_for(item_code: str, eng: frappe._dict | None = None, honor_serialwise: bool = True):
