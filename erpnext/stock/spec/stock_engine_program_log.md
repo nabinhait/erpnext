@@ -829,3 +829,11 @@ apnaklub migration ran): #58773 asset depreciation schedule patch,
 fix (asset-type checkboxes) was already fixed upstream independently
 as #58416 — no PR needed. Remaining upstream items: write-guard logger
 → v16, the 3 legacy report defects, #57980.
+
+2026-09-05 (backports + apnaklub) — Backport analysis: all four removal
+sites shipped in released version-16 (v15 unaffected — still has the
+method/field, lacks reporting currency), so "backport version-16-hotfix"
+labels added to #58773-76; #58416 already followed that path. Both
+sites migrated onto the rebased stack: test2 clean; apnaklub clean,
+exit 0, zero patch failures — the original five-bug gauntlet now passes
+end-to-end with our four fixes + upstream's #58416.
