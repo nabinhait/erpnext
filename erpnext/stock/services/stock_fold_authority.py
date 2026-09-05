@@ -233,9 +233,7 @@ def _refold(engine, policy, event_row: frappe._dict, args: dict, allow_negative_
 	# history changed at this instant: checkpoints photographed at or after it
 	# are stale and must never seed a read; they rebuild at the next closing
 	# or scheduled run
-	frappe.db.delete(
-		"Stock Fold Checkpoint", {**key, "as_of": (">=", str(event_row.posting_datetime))}
-	)
+	frappe.db.delete("Stock Fold Checkpoint", {**key, "as_of": (">=", str(event_row.posting_datetime))})
 
 	if frappe.conf.get(GL_ADJUSTMENT_FLAG):
 		if not args.get("skip_gl_adjustment"):
@@ -356,8 +354,8 @@ def _post_gl_adjustment(args: dict, event_row: frappe._dict, projections: dict, 
 
 	gl_map = []
 	for (counter, posting_date), delta in sorted(deltas.items()):
-		gl_map.append(_adjustment_row(args, warehouse_account, counter, delta, posting_date))
-		gl_map.append(_adjustment_row(args, counter, warehouse_account, -delta, posting_date))
+		gl_map.append(adjustment_row(args, warehouse_account, counter, delta, posting_date))
+		gl_map.append(adjustment_row(args, counter, warehouse_account, -delta, posting_date))
 
 	if gl_map:
 		make_gl_entries(gl_map)
@@ -377,7 +375,8 @@ def _counter_account(voucher_type: str, voucher_no: str, warehouse_account: str)
 	return against.split(",")[0].strip() if against else None
 
 
-def _adjustment_row(args: dict, account: str, against: str, debit: float, posting_date: str) -> frappe._dict:
+def adjustment_row(args: dict, account: str, against: str, debit: float, posting_date: str) -> frappe._dict:
+	"""One GL row of a stock value adjustment carried on the voucher in args."""
 	return frappe._dict(
 		{
 			"account": account,
@@ -481,9 +480,11 @@ def _latest_baseline(key: dict) -> str | None:
 
 
 def _baseline_active(row: frappe._dict) -> bool:
-	if not (row.voucher_type == "Stock Closing Entry" and row.voucher_no):
+	"""An owned baseline (Stock Closing Entry or Stock Opening Adjustment)
+	locks only while its owner stays submitted; unowned ones always do."""
+	if not (row.voucher_type and row.voucher_no):
 		return True
-	return cint(frappe.db.get_value("Stock Closing Entry", row.voucher_no, "docstatus")) == 1
+	return cint(frappe.db.get_value(row.voucher_type, row.voucher_no, "docstatus")) == 1
 
 
 def _is_baseline(row: frappe._dict) -> bool:
@@ -627,8 +628,8 @@ def post_revaluation_gl(
 	args = {"voucher_type": voucher_type, "voucher_no": voucher_no, "company": company}
 	make_gl_entries(
 		[
-			_adjustment_row(args, warehouse_account, credit_account, value_change, posting_date),
-			_adjustment_row(args, credit_account, warehouse_account, -value_change, posting_date),
+			adjustment_row(args, warehouse_account, credit_account, value_change, posting_date),
+			adjustment_row(args, credit_account, warehouse_account, -value_change, posting_date),
 		]
 	)
 

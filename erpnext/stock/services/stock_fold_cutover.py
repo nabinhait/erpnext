@@ -1,22 +1,27 @@
 # Copyright (c) 2026, Frappe Technologies Pvt. Ltd. and Contributors
 # License: GNU General Public License v3. See license.txt
 
-"""Freeze-the-past cutover baseline.
+"""Cutover baselines: pin a key's state at the frontier with one SLE-less
+Assertion fact per (item, warehouse).
 
-The grandfathering decision made concrete: one SLE-less Assertion fact per
-(item, warehouse) key pins legacy's stored balance at the freeze instant.
-Refolds and state rebuilds never walk behind a baseline, so historical
-values — including legacy's negative-stock math — stay exactly as written,
-while forward folding starts clean: a negative balance freezes as modelled
-exposure settled by the next receipts, batchwise batches and live serials
-are seeded as lot sub-states, and quantity-tag batches ride the pool.
+Two sources feed the same emitter:
 
-Emits facts only — no SLE rows, no GL, no repricing. Running it again
-simply lays a fresh baseline on top; refolds always start from the latest.
+- ``freeze_baseline`` — freeze-the-past: pins legacy's stored balance, lots
+  seeded from Serial and Batch Entries. Facts only, no GL, no repricing.
+- ``opening_delta`` — the v17 frontier: engine truth per key next to
+  legacy's stored value; the Stock Opening Adjustment owns the baselines it
+  emits from this and books the value difference once, in the open period.
+
+Refolds and rebuilds never walk behind the latest active baseline, so history
+stays exactly as written while forward folding starts clean: a negative
+balance freezes as modelled exposure settled by the next receipts, batchwise
+batches are seeded as lot sub-states, quantity-tag batches ride the pool.
 
     bench --site <site> execute erpnext.stock.services.stock_fold_cutover.freeze_baseline \
         --kwargs "{'company': 'My Company Ltd'}"
 """
+
+from collections.abc import Iterable
 
 import frappe
 from frappe.utils import flt
@@ -61,80 +66,157 @@ TOLERANCE = 1e-6
 
 
 def freeze_baseline(company: str, moment: str | None = None, closing_entry: str | None = None) -> dict:
-	"""Emit one baseline Assertion per key of the company, then invalidate
-	fold state so the next fold rebuilds from the baseline.
+	"""Emit one baseline Assertion per key of the company pinning legacy's
+	stored balance, then invalidate fold state so the next fold rebuilds
+	from the baseline.
 
 	With closing_entry, the baselines are owned by that Stock Closing Entry:
 	they lock only while it stays submitted — cancelling the closing revokes
 	them (the frontier model). Without it, the freeze is unconditional."""
 	moment = str(moment or frappe.utils.now_datetime())
+	report = {"company": company, "moment": moment, "negative": 0, "lot_mismatch": 0, "pool_residual": 0.0}
+	owner = ("Stock Closing Entry", closing_entry) if closing_entry else None
+
+	def baselines() -> Iterable[frappe._dict]:
+		for balance in _closing_balances(company, moment):
+			seeds = _legacy_seeds(balance, report)
+			if flt(balance.qty) < 0:
+				report["negative"] += 1
+			yield frappe._dict(
+				item_code=balance.item_code,
+				warehouse=balance.warehouse,
+				qty=flt(balance.qty),
+				rate=_pool_rate(balance, seeds, report),
+				seeds=seeds,
+			)
+
+	report["keys"] = emit_baselines(company, moment, baselines(), owner)
+	report["lots_seeded"] = report.pop("_lots_seeded", 0)
+	report["pool_residual"] = flt(report["pool_residual"], 4)
+	return report
+
+
+def opening_delta(company: str, moment: str) -> list[frappe._dict]:
+	"""Engine truth versus legacy's stored balance for every key of the
+	company at the moment. Each row carries what a baseline needs (qty,
+	rate, lot seeds from the fold's batch sub-states) and the value delta the
+	opening adjustment books. Keys the fold cannot value (Standard Cost) are
+	returned with ``skipped`` set and no delta."""
+	from erpnext.stock.services import stock_engine_bridge, stock_fold_read
+
+	engine = stock_engine_bridge.engine()
+	rows = []
+	for balance in _closing_balances(company, moment):
+		row = frappe._dict(
+			item_code=balance.item_code,
+			warehouse=balance.warehouse,
+			legacy_qty=flt(balance.qty),
+			legacy_value=flt(balance.value),
+		)
+		if stock_engine_bridge.policy_for(balance.item_code, engine) is None:
+			rows.append(row.update({"skipped": True}))
+			continue
+		state = stock_fold_read.state_as_of(balance.item_code, balance.warehouse, moment)
+		row.update(_engine_truth(engine, state))
+		row.delta = flt(row.engine_value - row.legacy_value, 6)
+		rows.append(row)
+	return rows
+
+
+def emit_baselines(
+	company: str, moment: str, baselines: Iterable[frappe._dict], owner: tuple[str, str] | None = None
+) -> int:
+	"""Bulk-insert baseline Assertion facts (``item_code``, ``warehouse``,
+	``qty``, ``rate``, ``seeds``) at the moment, optionally owned by a
+	voucher whose docstatus governs whether they lock, then drop the
+	company's fold state so the next fold starts from them. Returns the
+	number of keys pinned."""
 	timestamp = frappe.utils.now()
-	report = {
-		"company": company,
-		"moment": moment,
-		"keys": 0,
-		"negative": 0,
-		"lots_seeded": 0,
-		"lot_mismatch": 0,
-		"pool_residual": 0.0,
-	}
 	events: list[list] = []
 	allocations: list[list] = []
+	keys = 0
 
-	for balance in _closing_balances(company, moment):
+	for baseline in baselines:
 		event_id = frappe.db.get_next_sequence_val("Stock Event")
-		seeds = _key_seeds(balance, report)
-		assert_rate = _pool_rate(balance, seeds, report)
-		events.append(
-			[
-				event_id,
-				balance.item_code,
-				balance.warehouse,
-				company,
-				moment,
-				"Assertion",
-				0.0,
-				0.0,
-				flt(balance.qty),
-				assert_rate,
-				0.0,
-				"Stock Closing Entry" if closing_entry else None,
-				closing_entry,
-				"Baseline",
-				timestamp,
-				timestamp,
-				"Administrator",
-				"Administrator",
-			]
-		)
-		for position, seed in enumerate(seeds, start=1):
-			allocations.append(
-				[
-					frappe.generate_hash(length=10),
-					str(event_id),
-					"Stock Event",
-					"allocations",
-					position,
-					seed.serial_no,
-					seed.batch_no,
-					flt(seed.qty),
-					flt(seed.rate),
-					timestamp,
-					timestamp,
-					"Administrator",
-					"Administrator",
-				]
-			)
-		report["keys"] += 1
-		if flt(balance.qty) < 0:
-			report["negative"] += 1
+		events.append(_event_row(event_id, company, moment, baseline, owner, timestamp))
+		for position, seed in enumerate(baseline.seeds or (), start=1):
+			allocations.append(_allocation_row(event_id, position, seed, timestamp))
+		keys += 1
 		if len(events) >= FLUSH_AT:
 			_flush(events, allocations)
 
 	_flush(events, allocations)
-	_invalidate_fold_state(company)
-	report["pool_residual"] = flt(report["pool_residual"], 4)
-	return report
+	invalidate_fold_state(company)
+	return keys
+
+
+def _event_row(
+	event_id: int, company: str, moment: str, baseline: frappe._dict, owner, timestamp: str
+) -> list:
+	voucher_type, voucher_no = owner or (None, None)
+	return [
+		event_id,
+		baseline.item_code,
+		baseline.warehouse,
+		company,
+		moment,
+		"Assertion",
+		0.0,
+		0.0,
+		flt(baseline.qty),
+		flt(baseline.rate),
+		0.0,
+		voucher_type,
+		voucher_no,
+		"Baseline",
+		timestamp,
+		timestamp,
+		"Administrator",
+		"Administrator",
+	]
+
+
+def _allocation_row(event_id: int, position: int, seed: frappe._dict, timestamp: str) -> list:
+	return [
+		frappe.generate_hash(length=10),
+		str(event_id),
+		"Stock Event",
+		"allocations",
+		position,
+		seed.get("serial_no"),
+		seed.get("batch_no"),
+		flt(seed.qty),
+		flt(seed.rate),
+		timestamp,
+		timestamp,
+		"Administrator",
+		"Administrator",
+	]
+
+
+def _engine_truth(engine, state) -> dict:
+	"""What the fold says the key holds: quantity and value (a negative
+	balance is exposure, already netted by the engine), the pool rate a
+	baseline asserts, and the batch sub-states it seeds. Seeds are dropped
+	when the key is negative or the lots overshoot the balance — an assertion
+	cannot carry them then."""
+	from erpnext.stock.services import stock_engine_bridge
+
+	qty, value = flt(state.qty), stock_engine_bridge.equivalent_value(state)
+	seeds = [
+		frappe._dict(batch_no=lot.lot_id, qty=lot.state.qty, rate=lot.state.valuation_rate)
+		for lot in state.lots
+		if lot.lot_type is engine.LotType.BATCH and lot.state.qty > TOLERANCE
+	]
+	if qty <= 0 or sum(seed.qty for seed in seeds) > qty + TOLERANCE:
+		seeds = []
+	if qty < 0:
+		rate = flt(state.exposure_rate)
+	else:
+		pool_qty = qty - sum(seed.qty for seed in seeds)
+		pool_value = value - sum(seed.qty * seed.rate for seed in seeds)
+		rate = pool_value / pool_qty if pool_qty > TOLERANCE else (value / qty if qty else 0.0)
+	return {"engine_qty": qty, "engine_value": value, "rate": rate, "seeds": seeds}
 
 
 def _closing_balances(company: str, moment: str) -> list[frappe._dict]:
@@ -161,8 +243,8 @@ def _closing_balances(company: str, moment: str) -> list[frappe._dict]:
 	)
 
 
-def _key_seeds(balance: frappe._dict, report: dict) -> list[frappe._dict]:
-	"""Lot sub-states to seed: batches in valuation only.
+def _legacy_seeds(balance: frappe._dict, report: dict) -> list[frappe._dict]:
+	"""Lot sub-states to seed from legacy data: batches in valuation only.
 
 	Serials never seed sub-states — they are quantity tags whose rate is
 	derived from facts (serial-wise valuation model, §2.6); their quantity
@@ -184,7 +266,7 @@ def _key_seeds(balance: frappe._dict, report: dict) -> list[frappe._dict]:
 	if sum(flt(seed.qty) for seed in seeds) > flt(balance.qty) + TOLERANCE:
 		report["lot_mismatch"] += 1
 		return []
-	report["lots_seeded"] += len(seeds)
+	report["_lots_seeded"] = report.get("_lots_seeded", 0) + len(seeds)
 	return seeds
 
 
@@ -242,7 +324,9 @@ def _flush(events: list[list], allocations: list[list]) -> None:
 		frappe.db.commit()
 
 
-def _invalidate_fold_state(company: str) -> None:
+def invalidate_fold_state(company: str) -> None:
+	"""Drop every fold state of the company; the next fold of each key
+	rebuilds from its latest active baseline."""
 	warehouses = frappe.get_all("Warehouse", {"company": company}, pluck="name")
 	if warehouses:
 		frappe.db.delete("Stock Fold State", {"warehouse": ("in", warehouses)})

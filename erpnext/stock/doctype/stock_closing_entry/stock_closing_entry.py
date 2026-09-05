@@ -134,7 +134,19 @@ class StockClosingEntry(Document):
 	def on_cancel(self):
 		self.validate_closed_period_lock()
 		self.set_status(save=True)
+		self.cancel_opening_adjustments()
 		self.remove_stock_closing()
+
+	def cancel_opening_adjustments(self):
+		"""Reopening the period takes its frontier adjustment with it: the
+		value delta is reversed and the baselines it owns stop locking."""
+		adjustments = frappe.get_all(
+			"Stock Opening Adjustment", {"stock_closing_entry": self.name, "docstatus": 1}, pluck="name"
+		)
+		for name in adjustments:
+			adjustment = frappe.get_doc("Stock Opening Adjustment", name)
+			adjustment.flags.via_closing_cancel = True
+			adjustment.cancel()
 
 	def validate_closed_period_lock(self):
 		pcv = frappe.db.get_value(

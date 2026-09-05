@@ -1,0 +1,81 @@
+{
+ "actions": [],
+ "creation": "2026-09-05 20:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "item_code",
+  "warehouse",
+  "legacy_qty",
+  "engine_qty",
+  "legacy_value",
+  "engine_value",
+  "delta"
+ ],
+ "fields": [
+  {
+   "fieldname": "item_code",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Item",
+   "options": "Item",
+   "read_only": 1
+  },
+  {
+   "fieldname": "warehouse",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Warehouse",
+   "options": "Warehouse",
+   "read_only": 1
+  },
+  {
+   "fieldname": "legacy_qty",
+   "fieldtype": "Float",
+   "in_list_view": 1,
+   "label": "Legacy Qty",
+   "read_only": 1
+  },
+  {
+   "fieldname": "engine_qty",
+   "fieldtype": "Float",
+   "in_list_view": 1,
+   "label": "Engine Qty",
+   "read_only": 1
+  },
+  {
+   "fieldname": "legacy_value",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Legacy Value",
+   "read_only": 1
+  },
+  {
+   "fieldname": "engine_value",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Engine Value",
+   "read_only": 1
+  },
+  {
+   "fieldname": "delta",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Delta",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-09-05 20:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Stock",
+ "name": "Stock Opening Adjustment Item",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

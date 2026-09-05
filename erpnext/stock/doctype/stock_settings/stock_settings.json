@@ -81,6 +81,8 @@
   "stock_frozen_upto",
   "column_break_26",
   "stock_auth_role",
+  "opening_adjustment_section",
+  "opening_adjustment_threshold",
   "section_break_kcvr",
   "role_allowed_to_create_edit_back_dated_transactions",
   "document_naming_tab",
@@ -586,6 +588,17 @@
    "fieldname": "use_inline_serial_batch_editor",
    "fieldtype": "Check",
    "label": "Use Inline Serial / Batch Editor"
+  },
+  {
+   "fieldname": "opening_adjustment_section",
+   "fieldtype": "Section Break",
+   "label": "Stock Opening Adjustment"
+  },
+  {
+   "description": "A Stock Opening Adjustment whose absolute value delta is within this amount may be submitted without review (the migration submits it automatically). Leave 0 to always review.",
+   "fieldname": "opening_adjustment_threshold",
+   "fieldtype": "Currency",
+   "label": "Auto-submit threshold"
   }
  ],
  "icon": "icon-cog",
@@ -593,7 +606,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-08-10 12:00:00.000000",
+ "modified": "2026-09-05 20:00:00.000000",
  "modified_by": "Administrator",
  "module": "Stock",
  "name": "Stock Settings",
