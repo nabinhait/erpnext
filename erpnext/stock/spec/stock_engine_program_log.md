@@ -3,15 +3,15 @@
 ## ⟲ Session-restart snapshot — 2026-09-05 (evening)
 
 **Where everything is:**
-- **One program branch: `stock-ledger-redesign`** (origin = nabinhait/erpnext), tip `3dc25fb8`
-  (Opening Adjustment), rebased onto upstream develop (5beed5f4, Sep 5). frappe fast-forwarded
+- **One program branch: `stock-ledger-redesign`** (origin = nabinhait/erpnext), tip `eea2cc91c1`
+  (queued refolds + Stock Restatement), rebased onto upstream develop (5beed5f4, Sep 5). frappe fast-forwarded
   to `b56649ed` (Sep 4) — required by new erpnext. Safety tag `pre-rebase-2026-09-05` = old tip.
   The old stock-ledger-cutover name and the M2–M4-only branch are gone (renamed/deleted).
 - **Engine is vendored**: `erpnext/stock/engine/` (63 frappe-runner tests incl. property suite;
   purity gate = source-scan test). Standalone repo archived at `~/bench-cli/stock_engine-archive`
   (harnesses benchmark/ + sle_replay/ live only there).
 - **Sites**: test-runner-site migrated + full battery green (engine 63, authority 13, fold-read 5,
-  event 2, closing 7, opening adjustment 2). **test2 and apnaklub are on pre-rebase schema — `bench migrate` needed
+  event 2, closing 7, opening adjustment 2, refold 1, restatement 1). **test2 and apnaklub are on pre-rebase schema — `bench migrate` needed
   before next use** (apnaklub deliberately: last migration surfaced 5 patch bugs; those are now
   upstream, but a month of new patches + frappe jump is untested there).
 - **Flags on test2**: dual_write, fold_authoritative, suppress_legacy_repost, gl_adjustment.
@@ -38,14 +38,15 @@ closings manual locks.
 **Next steps (priority order):**
 1. **Production verification runs (Nabin)** — dual-write + shadow on real sites; shadow's
    negative_exposure bucket must be re-read after the d3363f56 fix (it was inflated).
-2. **Reopen-restatement job** — cancel of frontier closing enqueues year restatement (today it
-   cancels the Opening Adjustment and revokes the lock; values refold lazily).
-3. **REFOLD_CAP overflow → queued background refold** (v17 has no legacy fallback).
-4. **v17 migration patch** — one resumable full fold, FY-boundary checkpoints, frontier closing
+2. **v17 migration patch** — one resumable full fold, FY-boundary checkpoints, frontier closing
    entry, Opening Adjustment (auto-submit within threshold, else stop), current-FY refold. The
    SLE-absorbs-Stock-Event schema step is deferred until the production runs are done.
-5. **apnaklub**: Opening Adjustment compute dry run over 90k keys (first scale test of
-   opening_delta + the attached breakdown; child table holds differing keys only).
+3. **apnaklub**: Opening Adjustment compute dry run over 90k keys (first scale test of
+   opening_delta + the attached breakdown; child table holds differing keys only), then a
+   reopen (closing cancel → Stock Restatement) to size a year's refold.
+4. Refold queue hardening: per-key advisory lock in refold_key on postgres (sync appends and the
+   job can interleave; MariaDB gap locks cover it today), a Desk list view / retry button for
+   Failed rows.
 6. **Lint debt**: pre-commit hangs → every commit used --no-verify; fix hook, re-lint branch.
 7. Upstream wave: write-guard logger → v16 PR; remaining migration/report fixes; #57980.
 8. Gameplan post — blocked on user running `frappectl auth login` in a real terminal.
@@ -891,4 +892,33 @@ booked exactly, baseline 6 @ 100, fold continues from it (issue 1 →
 svd -100), threshold gating (0/5/10 vs |−8|), closing cancel cascades.
 Open: 90k-key scale of build() (single request in the long queue, one
 attachment), and whether the child table should cap rows.
+
+2026-09-06 — Queued refolds + Stock Restatement (eea2cc91c1). Refold core moved
+out of stock_fold_authority into stock_fold_refold (authority 873 → ~600
+lines): refold_for_event (sync, anchored) and refold_key (background,
+from an instant, no cap) share _refold_rows/_refold_window, anchored on a
+(posting_datetime, id) sort key instead of an inserted event.
+foldable_reason(key) → None | "cap" | "incomplete" | "lots".
+  Overflow queue: past REFOLD_CAP the backdate is valued from the
+nearest checkpoint (stock_fold_read.state_before = checkpoint + tail
+strictly before the event), future qty shifted via legacy
+update_qty_in_future_sle, outcome QUEUED (folded → RIV suppressed), and a
+Stock Refold row queued (one Queued row per key; earlier instant widens
+it). Worker: process_refold_queue (long queue, job_id dedupe, 25-min
+budget, re-kicks; hourly_long safety net). The tip fold state is left
+stale on purpose — self-healing when the job refolds the tail.
+  Stock Restatement: Stock Closing Entry.on_cancel → if it cancelled a
+live Opening Adjustment (i.e. it was the frontier) → start_for_closing.
+run_restatement: status In Progress → _slide_frontier (closing at the
+previous closing's to_date or FY start − 1, created+submitted if missing;
+Opening Adjustment built and auto-submitted when within threshold or
+zero) → one Stock Refold per key with events after the new frontier →
+process queue → finalize (Completed / Failed with keys_failed). GL
+corrections carried on the restatement (force_gl_adjustment, dated at
+each voucher's date). Lock: validate_no_running_restatement blocks SLEs
+dated ≤ to_date while Queued/In Progress. Tests: queued-vs-sync parity
+(values, Bin, stock account balance); reopen scenario (lock, new
+frontier + adjustment, drift of 37 restated, GL −37 on the restatement,
+old adjustment cancelled, unlock). Job exceptions re-raise under the test
+runner (a rollback there erases the sandbox).
 

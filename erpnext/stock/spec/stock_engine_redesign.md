@@ -1443,8 +1443,8 @@ write logger.
 *Status 2026-09-05: M0–M6 built and validated (real-data gates on apnaklub passed; see
 `stock_engine_program_log.md` for the program log and current resume snapshot). Sequencing below is
 superseded by "The v17 cutover: frozen frontier" section for everything from M4's gate onward —
-Stock Opening Adjustment built 2026-09-05 (3dc25fb8); remaining build: reopen-restatement job,
-refold overflow queue, the v17 migration patch. The SLE-absorbs-Stock-Event schema step is deferred
+Stock Opening Adjustment built 2026-09-05 (3dc25fb8), reopen restatement and the refold overflow
+queue 2026-09-06 (eea2cc91c1); remaining build: the v17 migration patch. The SLE-absorbs-Stock-Event schema step is deferred
 (Nabin, 2026-09-05) until the dual-write + shadow stack has been verified on production sites. Branch: `stock-ledger-redesign`, rebased on develop, engine vendored at
 `erpnext/stock/engine/`.*
 
@@ -1516,7 +1516,10 @@ frontier one year back.
 **Reopening = migrating that year.** A fold is path-dependent: there is no coherent "reprice only
 what the backdate touched." Cancelling the frontier's Stock Closing Entry therefore restates that
 whole year to engine truth (queued, resumable job — the first reopen of a legacy year is the
-expensive one; the period stays locked while it runs). The old adjustment recomputes to ≈0 and a
+expensive one; the period stays locked while it runs). *Built (eea2cc91c1): `Stock Restatement`, started
+by the closing's cancel, slides the frontier back (closing + Opening Adjustment at the previous
+closing or fiscal-year start), queues one `Stock Refold` per key, locks stock up to the reopened
+date until Completed.* The old adjustment recomputes to ≈0 and a
 fresh one materializes at the reopened year's own start: the correction slides back one boundary,
 closer to where the errors originated. Reopening must go **newest-first**. A site that eventually
 reopens everything has performed the full restatement step-by-deliberate-step; a site that never
@@ -1534,7 +1537,7 @@ replacement also posts today. (Reversing entries, applied to inventory.)
 | Stock closing submitted | Blocked — cancel it to reopen (reopen = migrate the year; adjustment slides back) |
 | Closing cancelled, PCV submitted | Refolds; stock reprices in-year, GL corrections clamp to the open period (§ closed-period clamp) |
 | No closing, no PCV | Just works — full refold across the FY boundary, stock and GL reprice at true as-of dates, adjustment untouched (it sits deeper, at the actual frontier) |
-| Beyond `REFOLD_CAP` | Same semantics, queued as a background refold instead of sync |
+| Beyond `REFOLD_CAP` | Same semantics, queued as a background refold instead of sync — *built (eea2cc91c1): own row valued from the nearest checkpoint, quantities shifted now, `Stock Refold` row processed by the queue worker* |
 
 `stock_frozen_upto` keeps working as an additional soft gate. The baseline guard is **conditional on
 the lock** (implemented 78e6ee97): a baseline emitted with a `closing_entry` is owned by that Stock
