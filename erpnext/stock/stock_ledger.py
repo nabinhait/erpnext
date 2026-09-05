@@ -127,6 +127,29 @@ def validate_stock_frozen_by_closing_entry(sl_entries):
 			)
 
 
+def validate_no_running_restatement(sl_entries):
+	from erpnext.stock.doctype.stock_restatement.stock_restatement import running_restatement
+
+	company = sl_entries[0].get("company") or frappe.get_cached_value(
+		"Warehouse", sl_entries[0].get("warehouse"), "company"
+	)
+	restatement = running_restatement(company)
+	if not restatement:
+		return
+
+	for sle in sl_entries:
+		if sle.get("posting_date") and getdate(sle.get("posting_date")) <= getdate(restatement.to_date):
+			frappe.throw(
+				_(
+					"Stock transactions dated on or before {0} are locked while Stock Restatement {1} restates the reopened period."
+				).format(
+					frappe.bold(format_date(restatement.to_date)),
+					get_link_to_form("Stock Restatement", restatement.name),
+				),
+				title=_("Period Being Restated"),
+			)
+
+
 def make_sl_entries(sl_entries, allow_negative_stock=False, via_landed_cost_voucher=False):
 	"""Create SL entries from SL entry dicts
 
@@ -146,6 +169,7 @@ def make_sl_entries(sl_entries, allow_negative_stock=False, via_landed_cost_vouc
 			sle_processing_gate(*pair)
 
 		validate_stock_frozen_by_closing_entry(sl_entries)
+		validate_no_running_restatement(sl_entries)
 
 		cancelled = sl_entries[0].get("is_cancelled")
 		if cancelled:
@@ -212,7 +236,8 @@ def repost_current_voucher(args, allow_negative_stock=False, via_landed_cost_vou
 			if not via_landed_cost_voucher:
 				folded = stock_fold_authority.try_fold(args, allow_negative_stock)
 
-			if folded == stock_fold_authority.APPENDED:
+			if folded in (stock_fold_authority.APPENDED, stock_fold_authority.QUEUED):
+				# quantities shift now; a queued refold values the later rows
 				update_qty_in_future_sle(args, allow_negative_stock)
 				return
 			if folded == stock_fold_authority.REFOLDED:

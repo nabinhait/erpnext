@@ -43,6 +43,27 @@ def state_as_of(item_code: str, warehouse: str, as_of: str):
 	return result.final
 
 
+def state_before(engine, event_row: frappe._dict):
+	"""The key's fold state just before this event in the total order
+	(nearest checkpoint plus the tail up to, excluding, the event)."""
+	checkpoint = _nearest_checkpoint(
+		event_row.item_code, event_row.warehouse, str(event_row.posting_datetime)
+	)
+	start, after = None, None
+	if checkpoint:
+		start = stock_engine_bridge.deserialize_state(engine, json.loads(checkpoint.state_json))
+		after = checkpoint.as_of
+
+	anchor = (str(event_row.posting_datetime), cint(event_row.name))
+	events = [
+		event
+		for event in _events(engine, event_row.item_code, event_row.warehouse, after=after, upto=anchor[0])
+		if (str(event.posting_datetime), event.id) < anchor
+	]
+	policy = _policy(engine, event_row.item_code)
+	return engine.replay(events, engine.FoldContext(policy=policy), start=start).final
+
+
 def ledger_rows(item_code: str, warehouse: str, from_dt: str, to_dt: str) -> list[dict]:
 	"""Running per-event rows for a ledger view of the window."""
 	engine = stock_engine_bridge.engine()

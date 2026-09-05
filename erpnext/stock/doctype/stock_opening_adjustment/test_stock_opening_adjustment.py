@@ -180,11 +180,17 @@ def _drift_legacy_value(key: dict, by: float) -> None:
 	last = frappe.get_all(
 		"Stock Ledger Entry",
 		filters={**key, "is_cancelled": 0},
-		fields=["name", "stock_value"],
+		fields=["name", "stock_value", "stock_value_difference"],
 		order_by="posting_datetime desc, creation desc",
 		limit=1,
 	)[0]
-	stock_ledger_writer.set_fields(last.name, {"stock_value": flt(last.stock_value) + by})
+	stock_ledger_writer.set_fields(
+		last.name,
+		{
+			"stock_value": flt(last.stock_value) + by,
+			"stock_value_difference": flt(last.stock_value_difference) + by,
+		},
+	)
 	frappe.db.set_value("Bin", {**key}, "stock_value", flt(last.stock_value) + by)
 
 

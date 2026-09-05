@@ -1,0 +1,166 @@
+{
+ "actions": [],
+ "autoname": "naming_series:",
+ "creation": "2026-09-06 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "naming_series",
+  "company",
+  "status",
+  "column_break_main",
+  "from_date",
+  "to_date",
+  "frontier_section",
+  "cancelled_closing_entry",
+  "frontier_closing_entry",
+  "opening_adjustment",
+  "progress_section",
+  "keys_total",
+  "keys_done",
+  "keys_failed",
+  "error"
+ ],
+ "fields": [
+  {
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "label": "Naming Series",
+   "options": "SRST-.YYYY.-.#####"
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Company",
+   "options": "Company",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "default": "Queued",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Queued\nIn Progress\nCompleted\nFailed",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_main",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "The frontier the restatement folds from (previous closing)",
+   "fieldname": "from_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "label": "From Date",
+   "read_only": 1
+  },
+  {
+   "description": "The reopened closing's date; stock stays locked up to here while the restatement runs",
+   "fieldname": "to_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "label": "To Date",
+   "read_only": 1
+  },
+  {
+   "fieldname": "frontier_section",
+   "fieldtype": "Section Break",
+   "label": "Frontier"
+  },
+  {
+   "fieldname": "cancelled_closing_entry",
+   "fieldtype": "Link",
+   "label": "Reopened Closing Entry",
+   "options": "Stock Closing Entry",
+   "read_only": 1
+  },
+  {
+   "fieldname": "frontier_closing_entry",
+   "fieldtype": "Link",
+   "label": "New Frontier Closing Entry",
+   "options": "Stock Closing Entry",
+   "read_only": 1
+  },
+  {
+   "fieldname": "opening_adjustment",
+   "fieldtype": "Link",
+   "label": "Opening Adjustment",
+   "options": "Stock Opening Adjustment",
+   "read_only": 1
+  },
+  {
+   "fieldname": "progress_section",
+   "fieldtype": "Section Break",
+   "label": "Progress"
+  },
+  {
+   "fieldname": "keys_total",
+   "fieldtype": "Int",
+   "label": "Keys Total",
+   "read_only": 1
+  },
+  {
+   "fieldname": "keys_done",
+   "fieldtype": "Int",
+   "label": "Keys Done",
+   "read_only": 1
+  },
+  {
+   "fieldname": "keys_failed",
+   "fieldtype": "Int",
+   "label": "Keys Failed",
+   "read_only": 1
+  },
+  {
+   "fieldname": "error",
+   "fieldtype": "Small Text",
+   "label": "Error",
+   "read_only": 1
+  }
+ ],
+ "in_create": 1,
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-09-06 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Stock",
+ "name": "Stock Restatement",
+ "naming_rule": "By \"Naming Series\" field",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Stock Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

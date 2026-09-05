@@ -188,7 +188,7 @@ class StockOpeningAdjustment(Document):
 	def post_gl_entries(self, rows: list[frappe._dict]) -> None:
 		from erpnext.accounts.general_ledger import make_gl_entries
 		from erpnext.stock import get_warehouse_account_map
-		from erpnext.stock.services.stock_fold_authority import adjustment_row
+		from erpnext.stock.services.stock_fold_refold import adjustment_row
 
 		account_map = get_warehouse_account_map(self.company)
 		deltas: dict[str, float] = {}

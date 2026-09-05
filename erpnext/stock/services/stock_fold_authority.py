@@ -11,9 +11,10 @@ fields become a projection of the fold's Effect, so GL derivation, Bin, and
 every report keep working unchanged.
 
 Anything the fold does not yet cover falls back to the legacy engine, per
-event: lot-tracked rows, Standard Cost, reconciliations, landed-cost reposts,
-backdated entries (future events exist), and keys whose event history is
-incomplete. Whenever the legacy engine rewrites a key
+event: Standard Cost, lot keys with legacy reconciliations, and keys whose
+event history is incomplete. Backdates refold the key synchronously
+(``stock_fold_refold``) or, past REFOLD_CAP, value their own row now and
+queue the rest. Whenever the legacy engine rewrites a key
 (``stock_ledger_writer.write_valuation``), the key's fold state is
 invalidated and rebuilt from events on its next fold. Correctness never
 depends on the checkpoint: it is disposable tier-2 state.
@@ -30,7 +31,7 @@ SUPPRESS_FLAG = "stock_fold_suppress_legacy_repost"
 GL_ADJUSTMENT_FLAG = "stock_fold_gl_adjustment"
 APPENDED = "appended"
 REFOLDED = "refolded"
-REFOLD_CAP = 20000
+QUEUED = "queued"
 LOT_CARDINALITY_GUARDRAIL = 5000
 
 
@@ -85,7 +86,9 @@ def _try_fold(args: dict, allow_negative_stock: bool) -> str | None:
 		return None
 
 	if _has_future_events(event_row):
-		return _refold(engine, policy, event_row, args, allow_negative_stock)
+		from erpnext.stock.services import stock_fold_refold
+
+		return stock_fold_refold.refold_for_event(engine, policy, event_row, args, allow_negative_stock)
 
 	state, last_event, checkpoint = _load_state(engine, event_row)
 	if state is None:
@@ -142,325 +145,40 @@ def _allocations(event_names: list) -> dict[str, list[frappe._dict]]:
 	return grouped
 
 
-def _refold(engine, policy, event_row: frappe._dict, args: dict, allow_negative_stock: bool) -> str | None:
-	"""Backdated insert or revaluation: synchronously refold the whole key and
-	rewrite the projections of every row whose values changed. Bundle-backed
-	lot keys fold their allocations as lot sub-states; lot keys carrying
-	assertions stay legacy (an assertion cannot reconstruct lots)."""
-	from erpnext.stock.services import stock_engine_bridge
-
-	key = {"item_code": event_row.item_code, "warehouse": event_row.warehouse}
-	if not _history_foldable(key, allow_lots=True):
-		return None
-
-	baseline = _latest_baseline(key)
-	if baseline and str(event_row.posting_datetime) < str(baseline):
-		return None  # backdates into the frozen era stay legacy
-
-	filters = dict(key)
-	if baseline:
-		filters["posting_datetime"] = (">=", str(baseline))
-	rows = _drop_revoked_baselines(
-		frappe.get_all(
-			"Stock Event",
-			filters=filters,
-			fields=[
-				"name",
-				"item_code",
-				"posting_datetime",
-				"kind",
-				"qty_change",
-				"declared_rate",
-				"assert_qty",
-				"assert_rate",
-				"reverses_event",
-				"value_change",
-				"sle",
-				"voucher_type",
-				"voucher_no",
-			],
-			order_by="posting_datetime, name",
-		)
-	)
-
-	window = _refold_window(rows, event_row)
-	is_tail = window[1] == len(rows)
-	rows = rows[window[0] : window[1]]
-	# a boundary assertion reconstructs the state but its own stored values are
-	# untouched by the backdate — never re-project it
-	changed_rows = rows[1:] if window[0] > 0 else rows
-
-	bundle_rows = _bundle_backed_sles(key)
-	allocations = _allocations([row.name for row in rows])
-	try:
-		events = [
-			stock_engine_bridge.to_event(
-				engine,
-				row,
-				allocations.get(str(row.name)) if row.sle in bundle_rows or _is_baseline(row) else None,
-			)
-			for row in rows
-		]
-	except ValueError:
-		return None
-
-	result = engine.replay(events, engine.FoldContext(policy=policy))
-	_validate_negative(result.effects[cint(event_row.name)], args, allow_negative_stock)
-
-	live = {
-		sle.name: sle
-		for sle in frappe.get_all(
-			"Stock Ledger Entry",
-			filters={**key, "is_cancelled": 0, "name": ("in", [row.sle for row in changed_rows if row.sle])},
-			fields=["name", "voucher_type", "voucher_no", "posting_date", "stock_value_difference"],
-		)
-	}
-	start_value = 0.0
-	if window[0] > 0:
-		start_value = _equivalent_value(result.states[cint(rows[0].name)])
-	projections = _absorbed_projections(changed_rows, result, start_value)
-	for sle_name, projection in projections.items():
-		if sle_name not in live:
-			continue
-		_project_sle_values(sle_name, projection, policy, engine)
-
-	if is_tail:
-		# the window reaches the present, so latest state and checkpoint move
-		_project_bin(event_row, result.final)
-		last_id = max(cint(row.name) for row in rows)
-		_save_state(engine, frappe._dict({**key, "name": last_id}), result.final)
-
-	# history changed at this instant: checkpoints photographed at or after it
-	# are stale and must never seed a read; they rebuild at the next closing
-	# or scheduled run
-	frappe.db.delete("Stock Fold Checkpoint", {**key, "as_of": (">=", str(event_row.posting_datetime))})
-
-	if frappe.conf.get(GL_ADJUSTMENT_FLAG):
-		if not args.get("skip_gl_adjustment"):
-			_post_gl_adjustment(args, event_row, projections, live)
-	elif frappe.conf.get(SUPPRESS_FLAG):
-		_regenerate_gl(args, event_row, live.values())
-
-	return REFOLDED
-
-
-def _open_period_date(posting_date, closed_until, fallback) -> str:
-	"""Adjustments never post into a closed accounting period: dates at or
-	before the latest Period Closing Voucher clamp to the revising voucher's
-	own date (which passed close validation at submit)."""
-	if closed_until and str(posting_date) <= str(closed_until):
-		return str(fallback)
-	return str(posting_date)
-
-
-def _closed_until(company: str):
-	return frappe.db.get_value(
-		"Period Closing Voucher",
-		{"docstatus": 1, "company": company},
-		"period_end_date",
-		order_by="period_end_date desc",
-	)
-
-
 def _equivalent_value(state) -> float:
 	from erpnext.stock.services import stock_engine_bridge
 
 	return stock_engine_bridge.equivalent_value(state)
 
 
-def _absorbed_projections(rows: list, result, start_value: float) -> dict:
-	"""Per-SLE projection values with SLE-less events (revaluations) absorbed
-	into the preceding SLE row — the shape legacy books carry landed cost in."""
-	projections: dict[str, dict] = {}
-	prev_value = start_value
-	index, total = 0, len(rows)
-
-	while index < total and not rows[index].sle:
-		prev_value = _equivalent_value(result.states[cint(rows[index].name)])
-		index += 1
-
-	while index < total:
-		row = rows[index]
-		tail = index
-		while tail + 1 < total and not rows[tail + 1].sle:
-			tail += 1
-		state = result.states[cint(rows[tail].name)]
-		value = _equivalent_value(state)
-		projections[row.sle] = {
-			"qty_after": result.effects[cint(row.name)].qty_after,
-			"value": value,
-			"svd": value - prev_value,
-			"state": state,
-		}
-		prev_value = value
-		index = tail + 1
-
-	return projections
-
-
-def _project_sle_values(sle_name: str, projection: dict, policy, engine) -> None:
-	from erpnext.stock.services import stock_ledger_writer
-
-	state = projection["state"]
-	layered = isinstance(policy, engine.Fifo | engine.Lifo)
-	stock_queue = [[layer.qty, layer.rate] for layer in state.layers] if layered else []
-	stock_ledger_writer.set_fields(
-		sle_name,
-		{
-			"qty_after_transaction": projection["qty_after"],
-			"valuation_rate": state.valuation_rate,
-			"stock_value": projection["value"],
-			"stock_value_difference": projection["svd"],
-			"stock_queue": json.dumps(stock_queue),
-		},
-	)
-
-
-def _post_gl_adjustment(args: dict, event_row: frappe._dict, projections: dict, live: dict) -> None:
-	"""Append-only GL: never rewrite affected vouchers' postings.
-
-	The net svd deltas the refold caused are posted as fresh GL rows on the
-	triggering voucher, netted per counter account and dated on the affected
-	voucher's own posting date — every correction takes effect exactly when
-	the movement it corrects took effect, so stock value and stock account
-	balance agree on every as-of date. Closings guarantee those dates lie in
-	the open period. Historical vouchers keep the GL rows they were reported
-	with; the correction is its own auditable posting."""
-	from erpnext.accounts.general_ledger import make_gl_entries
-	from erpnext.stock import get_warehouse_account_map
-
-	account_map = get_warehouse_account_map(args.get("company"))
-	warehouse_account = (account_map.get(event_row.warehouse) or {}).get("account")
-	if not warehouse_account:
-		return  # no perpetual stock GL on this warehouse: nothing to correct
-
-	excluded = args.get("exclude_voucher") or (args.get("voucher_type"), args.get("voucher_no"))
-	closed_until = _closed_until(args.get("company"))
-	fallback_date = args.get("posting_date") or frappe.utils.nowdate()
-	deltas: dict[tuple[str, str], float] = {}
-	for sle_name, projection in projections.items():
-		stored = live.get(sle_name)
-		if stored is None or (stored.voucher_type, stored.voucher_no) == tuple(excluded):
-			continue
-
-		delta = flt(projection["svd"]) - flt(stored.stock_value_difference)
-		if abs(delta) < 0.005:
-			continue
-
-		counter = _counter_account(stored.voucher_type, stored.voucher_no, warehouse_account)
-		if counter:
-			key = (counter, _open_period_date(stored.posting_date, closed_until, fallback_date))
-			deltas[key] = deltas.get(key, 0.0) + delta
-
-	gl_map = []
-	for (counter, posting_date), delta in sorted(deltas.items()):
-		gl_map.append(adjustment_row(args, warehouse_account, counter, delta, posting_date))
-		gl_map.append(adjustment_row(args, counter, warehouse_account, -delta, posting_date))
-
-	if gl_map:
-		make_gl_entries(gl_map)
-
-
-def _counter_account(voucher_type: str, voucher_no: str, warehouse_account: str) -> str | None:
-	against = frappe.db.get_value(
-		"GL Entry",
-		{
-			"voucher_type": voucher_type,
-			"voucher_no": voucher_no,
-			"account": warehouse_account,
-			"is_cancelled": 0,
-		},
-		"against",
-	)
-	return against.split(",")[0].strip() if against else None
-
-
-def adjustment_row(args: dict, account: str, against: str, debit: float, posting_date: str) -> frappe._dict:
-	"""One GL row of a stock value adjustment carried on the voucher in args."""
-	return frappe._dict(
-		{
-			"account": account,
-			"against": against,
-			"debit": debit if debit > 0 else 0,
-			"credit": -debit if debit < 0 else 0,
-			"debit_in_account_currency": debit if debit > 0 else 0,
-			"credit_in_account_currency": -debit if debit < 0 else 0,
-			"voucher_type": args.get("voucher_type"),
-			"voucher_no": args.get("voucher_no"),
-			"company": args.get("company"),
-			"posting_date": posting_date,
-			"cost_center": frappe.get_cached_value("Company", args.get("company"), "cost_center"),
-			"remarks": args.get("adjustment_remark") or "Stock value adjustment for backdated entry",
-			"is_opening": "No",
-		}
-	)
-
-
-def _refold_window(rows: list, event_row: frappe._dict) -> tuple[int, int]:
-	"""The slice of history a backdate can actually change.
-
-	An assertion pins quantity and value, so the refold starts at the last
-	assertion at or before the inserted event (folded from empty, it
-	reconstructs the exact state) and stops after the first assertion beyond
-	it. A reversal referencing an event before the window forces a full
-	refold — its source layer lives outside the slice."""
-	inserted = next(index for index, row in enumerate(rows) if cint(row.name) == cint(event_row.name))
-
-	start = 0
-	for index in range(inserted, -1, -1):
-		if rows[index].kind == "Assertion":
-			start = index
-			break
-
-	end = len(rows)
-	for index in range(inserted + 1, len(rows)):
-		if rows[index].kind == "Assertion":
-			end = index + 1
-			break
-
-	window_start_id = cint(rows[start].name)
-	for row in rows[start:end]:
-		if (
-			row.kind in ("Reversal", "Revaluation")
-			and row.reverses_event
-			and cint(row.reverses_event) < window_start_id
-		):
-			return (0, len(rows))
-
-	return (start, end)
-
-
-def _regenerate_gl(args: dict, event_row: frappe._dict, live_sles) -> None:
-	"""With the legacy repost suppressed, correct affected vouchers' GL inline.
-
-	Comparison-based regeneration: only vouchers whose GL no longer matches
-	their (refolded) svd get rewritten. The voucher being submitted is
-	excluded — its GL posts normally later in the same submit."""
-	from erpnext.accounts.utils import repost_gle_for_stock_vouchers
-
-	current = (args.get("voucher_type"), args.get("voucher_no"))
-	vouchers = sorted({(sle.voucher_type, sle.voucher_no) for sle in live_sles} - {current})
-	repost_gle_for_stock_vouchers(vouchers, str(event_row.posting_datetime)[:10], company=args.get("company"))
-
-
 def _history_foldable(key: dict, allow_lots: bool = False) -> bool:
-	"""Complete event history since the last baseline (an SLE-less assertion
-	pinning legacy's stored balance — everything behind it is frozen), small
-	enough for a sync fold, and — when the key is lot-tracked — free of
-	reconciliations after that baseline (a legacy reco resets the aggregate
-	but cannot reconstruct lots; a baseline seeds them)."""
+	return foldable_reason(key, allow_lots) is None
+
+
+def foldable_reason(key: dict, allow_lots: bool = False, ignore_cap: bool = False) -> str | None:
+	"""Why the key's history cannot be folded synchronously, or None.
+
+	"cap": more events since the last baseline than a sync refold may take
+	(the queued refold handles it); "incomplete": a live SLE since the
+	baseline has no event; "lots": a lot-tracked key carrying a legacy
+	reconciliation after the baseline (a reco resets the aggregate but
+	cannot reconstruct lots; only a baseline seeds them). History behind a
+	baseline is frozen and never counted."""
 	baseline = _latest_baseline(key)
 	since = {"posting_datetime": (">", str(baseline))} if baseline else {}
 	events = frappe.db.count("Stock Event", {**key, **since})
-	if events > REFOLD_CAP:
-		return False
 	if events < frappe.db.count("Stock Ledger Entry", {**key, "is_cancelled": 0, **since}):
-		return False
-	if not _key_has_bundles(key):
-		return True
-	if not allow_lots:
-		return False
-	return not frappe.db.exists("Stock Event", {**key, "kind": "Assertion", "sle": ("is", "set"), **since})
+		return "incomplete"
+	if _key_has_bundles(key):
+		if not allow_lots:
+			return "lots"
+		if frappe.db.exists("Stock Event", {**key, "kind": "Assertion", "sle": ("is", "set"), **since}):
+			return "lots"
+	from erpnext.stock.services.stock_fold_refold import REFOLD_CAP
+
+	if not ignore_cap and events > REFOLD_CAP:
+		return "cap"
+	return None
 
 
 def _latest_baseline(key: dict) -> str | None:
@@ -578,7 +296,9 @@ def revalue(
 		"adjustment_remark": "Stock value adjustment for landed cost",
 		"skip_gl_adjustment": skip_gl_adjustment,
 	}
-	outcome = _refold(engine, policy, event_row, args, allow_negative_stock=True)
+	from erpnext.stock.services import stock_fold_refold
+
+	outcome = stock_fold_refold.refold_for_event(engine, policy, event_row, args, allow_negative_stock=True)
 	if outcome is None:
 		frappe.db.delete("Stock Event", {"name": emitted.name})
 		return None
@@ -622,14 +342,16 @@ def post_revaluation_gl(
 	if not warehouse_account:
 		return
 
-	posting_date = _open_period_date(
-		posting_date, _closed_until(company), fallback_date or frappe.utils.nowdate()
+	from erpnext.stock.services import stock_fold_refold as refold
+
+	posting_date = refold._open_period_date(
+		posting_date, refold._closed_until(company), fallback_date or frappe.utils.nowdate()
 	)
 	args = {"voucher_type": voucher_type, "voucher_no": voucher_no, "company": company}
 	make_gl_entries(
 		[
-			adjustment_row(args, warehouse_account, credit_account, value_change, posting_date),
-			adjustment_row(args, credit_account, warehouse_account, -value_change, posting_date),
+			refold.adjustment_row(args, warehouse_account, credit_account, value_change, posting_date),
+			refold.adjustment_row(args, credit_account, warehouse_account, -value_change, posting_date),
 		]
 	)
 

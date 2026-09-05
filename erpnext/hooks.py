@@ -498,7 +498,9 @@ scheduler_events = {
 	"hourly": [
 		"erpnext.projects.doctype.project.project.hourly_reminder",
 	],
-	"hourly_long": [],
+	"hourly_long": [
+		"erpnext.stock.doctype.stock_refold.stock_refold.process_refold_queue",
+	],
 	"hourly_maintenance": [
 		"erpnext.crm.doctype.appointment.appointment.handle_expired_unverified_appointments",
 		"erpnext.stock.doctype.repost_item_valuation.repost_item_valuation.repost_entries",
