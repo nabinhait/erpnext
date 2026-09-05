@@ -21,6 +21,22 @@ from frappe.utils.background_jobs import enqueue
 
 JOB_ID = "stock_refold_queue"
 TIME_BUDGET = 25 * 60
+BULK_CHUNK = 500
+BULK_FIELDS = (
+	"name",
+	"item_code",
+	"warehouse",
+	"company",
+	"from_datetime",
+	"status",
+	"voucher_type",
+	"voucher_no",
+	"stock_restatement",
+	"creation",
+	"modified",
+	"owner",
+	"modified_by",
+)
 
 
 class StockRefold(Document):
@@ -44,6 +60,11 @@ class StockRefold(Document):
 	# end: auto-generated types
 
 	pass
+
+
+def on_doctype_update():
+	frappe.db.add_index("Stock Refold", ["status", "creation"])
+	frappe.db.add_index("Stock Refold", ["item_code", "warehouse", "status"])
 
 
 def enqueue_refold(
@@ -84,11 +105,44 @@ def enqueue_refold(
 	return row.name
 
 
+def enqueue_refolds(keys: list[frappe._dict], company: str, from_datetime: str, restatement: str) -> None:
+	"""Bulk form for a restatement: one row per key not already queued, all
+	carrying the restatement as the voucher the corrections ride on."""
+	pending = {
+		(row.item_code, row.warehouse)
+		for row in frappe.get_all(
+			"Stock Refold", {"company": company, "status": "Queued"}, ["item_code", "warehouse"]
+		)
+	}
+	timestamp = frappe.utils.now()
+	rows = [
+		[
+			frappe.generate_hash(length=10),
+			key.item_code,
+			key.warehouse,
+			company,
+			str(from_datetime),
+			"Queued",
+			"Stock Restatement",
+			restatement,
+			restatement,
+			timestamp,
+			timestamp,
+			"Administrator",
+			"Administrator",
+		]
+		for key in keys
+		if (key.item_code, key.warehouse) not in pending
+	]
+	for start in range(0, len(rows), BULK_CHUNK):
+		frappe.db.bulk_insert("Stock Refold", BULK_FIELDS, rows[start : start + BULK_CHUNK])
+
+
 def kick() -> None:
 	enqueue(process_refold_queue, queue="long", timeout=3600, job_id=JOB_ID, deduplicate=True)
 
 
-def process_refold_queue(restatement: str | None = None, time_budget: int = TIME_BUDGET) -> dict:
+def process_refold_queue(restatement: str | None = None) -> dict:
 	"""Refold queued rows oldest first until none remain or the budget is
 	spent; finalizes any restatement whose rows are all done."""
 	from erpnext.stock.doctype.stock_restatement.stock_restatement import finalize_if_done
@@ -96,7 +150,7 @@ def process_refold_queue(restatement: str | None = None, time_budget: int = TIME
 	started = time.monotonic()
 	report = {"completed": 0, "failed": 0}
 	restatements = set()
-	while time.monotonic() - started < time_budget:
+	while time.monotonic() - started < TIME_BUDGET:
 		row = _next_queued(restatement)
 		if not row:
 			break
@@ -106,7 +160,7 @@ def process_refold_queue(restatement: str | None = None, time_budget: int = TIME
 
 	for name in restatements:
 		finalize_if_done(name)
-	if _next_queued(restatement) and not frappe.in_test:
+	if _next_queued(restatement):
 		kick()
 	return report
 
@@ -156,24 +210,20 @@ def _run(row: frappe._dict, report: dict) -> None:
 
 
 def _args(row: frappe._dict) -> dict:
-	"""GL corrections ride on the voucher that caused the refold: the
-	backdated voucher, or the restatement itself (which always books
-	append-only corrections)."""
-	if row.stock_restatement:
-		return {
-			"company": row.company,
-			"voucher_type": "Stock Restatement",
-			"voucher_no": row.stock_restatement,
-			"posting_date": nowdate(),
-			"adjustment_remark": "Stock value restatement after reopening the period",
-			"force_gl_adjustment": True,
-		}
-	return {
+	"""GL corrections ride on the voucher that caused the refold; a
+	restatement always books them as append-only adjustments."""
+	args = {
 		"company": row.company,
 		"voucher_type": row.voucher_type,
 		"voucher_no": row.voucher_no,
 		"posting_date": nowdate(),
 	}
+	if row.stock_restatement:
+		args.update(
+			adjustment_remark="Stock value restatement after reopening the period",
+			force_gl_adjustment=True,
+		)
+	return args
 
 
 def _commit() -> None:

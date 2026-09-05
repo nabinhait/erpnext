@@ -6,18 +6,21 @@ from unittest.mock import patch
 import frappe
 from frappe.utils import add_days, flt, today
 
-from erpnext.stock import get_warehouse_account_map
 from erpnext.stock.doctype.item.test_item import make_item
 from erpnext.stock.doctype.stock_entry.stock_entry_utils import make_stock_entry
 from erpnext.stock.doctype.stock_opening_adjustment.test_stock_opening_adjustment import (
+	CLOSING_ENQUEUE,
 	_drift_legacy_value,
+	make_company,
+	make_warehouse,
+	stock_account_balance,
+	submit_closing,
 )
 from erpnext.stock.doctype.stock_restatement import stock_restatement
 from erpnext.tests.utils import ERPNextTestSuite
 
 COMPANY = "_Test Restatement Company"
 ABBREVIATION = "TRSC"
-CLOSING_ENQUEUE = "erpnext.stock.doctype.stock_closing_entry.stock_closing_entry.enqueue"
 
 
 class TestStockRestatement(ERPNextTestSuite):
@@ -26,8 +29,8 @@ class TestStockRestatement(ERPNextTestSuite):
 		period, slides the frontier one closing back (new closing + opening
 		adjustment), refolds every key to engine truth with the corrections
 		booked on the restatement, and unlocks when done."""
-		company = _company()
-		warehouse = _warehouse("Restatement WH", company)
+		company = make_company(COMPANY, ABBREVIATION)
+		warehouse = make_warehouse("Restatement WH", company)
 		item = make_item(properties={"is_stock_item": 1, "valuation_method": "Moving Average"}).name
 		key = {"item_code": item, "warehouse": warehouse}
 		frontier = add_days(today(), -1)
@@ -105,7 +108,7 @@ class TestStockRestatement(ERPNextTestSuite):
 			self.assertAlmostEqual(flt(last.stock_value), 600, places=2)
 			self.assertAlmostEqual(flt(last.stock_value_difference), -400, places=2)
 			self.assertAlmostEqual(flt(frappe.db.get_value("Bin", key, "stock_value")), 600, places=2)
-			self.assertAlmostEqual(self._stock_account_delta(name, warehouse, company), -37, places=2)
+			self.assertAlmostEqual(stock_account_balance(company, warehouse, name), -37, places=2)
 
 			# unlocked: the period accepts entries again
 			make_stock_entry(item_code=item, source=warehouse, qty=1, company=company, posting_date=frontier)
@@ -113,49 +116,10 @@ class TestStockRestatement(ERPNextTestSuite):
 			frappe.conf.pop("stock_event_dual_write", None)
 
 	def _frontier(self, company: str, to_date: str):
-		closing = frappe.get_doc(
-			doctype="Stock Closing Entry", company=company, from_date=add_days(to_date, -30), to_date=to_date
-		)
-		with patch(CLOSING_ENQUEUE):
-			closing.submit()
+		closing = submit_closing(company, to_date)
 		adjustment = frappe.get_doc(
 			doctype="Stock Opening Adjustment", company=company, stock_closing_entry=closing.name
 		).insert()
 		adjustment.build()
 		adjustment.submit()
 		return closing, adjustment
-
-	def _stock_account_delta(self, voucher_no: str, warehouse: str, company: str) -> float:
-		account = get_warehouse_account_map(company)[warehouse].account
-		rows = frappe.get_all(
-			"GL Entry",
-			filters={"voucher_no": voucher_no, "account": account, "is_cancelled": 0},
-			fields=["debit", "credit"],
-		)
-		return flt(sum(flt(row.debit) - flt(row.credit) for row in rows))
-
-
-def _company() -> str:
-	if not frappe.db.exists("Company", COMPANY):
-		frappe.get_doc(
-			doctype="Company",
-			company_name=COMPANY,
-			abbr=ABBREVIATION,
-			default_currency="INR",
-			country="India",
-			chart_of_accounts="Standard",
-			enable_perpetual_inventory=1,
-		).insert()
-	return COMPANY
-
-
-def _warehouse(name: str, company: str) -> str:
-	full_name = f"{name} - {ABBREVIATION}"
-	if not frappe.db.exists("Warehouse", full_name):
-		frappe.get_doc(
-			doctype="Warehouse",
-			warehouse_name=name,
-			company=company,
-			parent_warehouse=f"All Warehouses - {ABBREVIATION}",
-		).insert()
-	return full_name

@@ -26,7 +26,7 @@ from frappe.model.document import Document
 from frappe.utils import add_days, cint, flt, get_link_to_form
 from frappe.utils.background_jobs import enqueue
 
-from erpnext.stock.services import stock_fold_cutover
+from erpnext.stock.services import stock_engine_bridge, stock_fold_cutover
 
 QTY_TOLERANCE = 1e-6
 
@@ -63,7 +63,7 @@ class StockOpeningAdjustment(Document):
 	def validate(self):
 		closing = self.closing_entry()
 		self.validate_closing(closing)
-		self.moment = f"{closing.to_date} 23:59:59.999999"
+		self.moment = stock_engine_bridge.end_of_day(closing.to_date)
 		self.posting_date = add_days(closing.to_date, 1)
 		if not self.adjustment_account:
 			self.adjustment_account = frappe.get_cached_value(
@@ -128,7 +128,9 @@ class StockOpeningAdjustment(Document):
 		self.db_set("status", "Cancelled")
 
 	def validate_reopen(self) -> None:
-		if self.flags.via_closing_cancel or self.closing_entry().docstatus != 1:
+		"""Only the owning closing may take this down: when it cascades, its
+		own cancel is already written."""
+		if self.closing_entry().docstatus != 1:
 			return
 		frappe.throw(
 			_(
@@ -188,7 +190,7 @@ class StockOpeningAdjustment(Document):
 	def post_gl_entries(self, rows: list[frappe._dict]) -> None:
 		from erpnext.accounts.general_ledger import make_gl_entries
 		from erpnext.stock import get_warehouse_account_map
-		from erpnext.stock.services.stock_fold_refold import adjustment_row
+		from erpnext.stock.services.stock_fold_refold import adjustment_pair
 
 		account_map = get_warehouse_account_map(self.company)
 		deltas: dict[str, float] = {}
@@ -207,8 +209,7 @@ class StockOpeningAdjustment(Document):
 		for account, delta in sorted(deltas.items()):
 			if abs(delta) < 0.005:
 				continue
-			gl_map.append(adjustment_row(args, account, self.adjustment_account, delta, self.posting_date))
-			gl_map.append(adjustment_row(args, self.adjustment_account, account, -delta, self.posting_date))
+			gl_map.extend(adjustment_pair(args, account, self.adjustment_account, delta, self.posting_date))
 		if gl_map:
 			make_gl_entries(gl_map)
 
@@ -223,12 +224,16 @@ class StockOpeningAdjustment(Document):
 			value_shift = flt(row.delta)
 			if abs(qty_shift) <= QTY_TOLERANCE and not value_shift:
 				continue
-			bin_name = get_or_make_bin(row.item_code, row.warehouse)
-			current = frappe.db.get_value("Bin", bin_name, ["actual_qty", "stock_value"], as_dict=True)
+			current = frappe.db.get_value(
+				"Bin",
+				{"item_code": row.item_code, "warehouse": row.warehouse},
+				["name", "actual_qty", "stock_value"],
+				as_dict=True,
+			) or frappe._dict(name=get_or_make_bin(row.item_code, row.warehouse))
 			actual_qty = flt(current.actual_qty) + direction * qty_shift
 			stock_value = flt(current.stock_value) + direction * value_shift
 			bin_writer.set_fields(
-				bin_name,
+				current.name,
 				{
 					"actual_qty": actual_qty,
 					"stock_value": stock_value,

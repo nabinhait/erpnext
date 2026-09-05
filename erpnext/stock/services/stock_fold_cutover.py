@@ -74,7 +74,14 @@ def freeze_baseline(company: str, moment: str | None = None, closing_entry: str 
 	they lock only while it stays submitted — cancelling the closing revokes
 	them (the frontier model). Without it, the freeze is unconditional."""
 	moment = str(moment or frappe.utils.now_datetime())
-	report = {"company": company, "moment": moment, "negative": 0, "lot_mismatch": 0, "pool_residual": 0.0}
+	report = {
+		"company": company,
+		"moment": moment,
+		"negative": 0,
+		"lots_seeded": 0,
+		"lot_mismatch": 0,
+		"pool_residual": 0.0,
+	}
 	owner = ("Stock Closing Entry", closing_entry) if closing_entry else None
 
 	def baselines() -> Iterable[frappe._dict]:
@@ -82,16 +89,17 @@ def freeze_baseline(company: str, moment: str | None = None, closing_entry: str 
 			seeds = _legacy_seeds(balance, report)
 			if flt(balance.qty) < 0:
 				report["negative"] += 1
+			rate, residual = _pool_rate(flt(balance.qty), flt(balance.value), seeds)
+			report["pool_residual"] += residual
 			yield frappe._dict(
 				item_code=balance.item_code,
 				warehouse=balance.warehouse,
 				qty=flt(balance.qty),
-				rate=_pool_rate(balance, seeds, report),
+				rate=rate,
 				seeds=seeds,
 			)
 
 	report["keys"] = emit_baselines(company, moment, baselines(), owner)
-	report["lots_seeded"] = report.pop("_lots_seeded", 0)
 	report["pool_residual"] = flt(report["pool_residual"], 4)
 	return report
 
@@ -105,6 +113,7 @@ def opening_delta(company: str, moment: str) -> list[frappe._dict]:
 	from erpnext.stock.services import stock_engine_bridge, stock_fold_read
 
 	engine = stock_engine_bridge.engine()
+	checkpoints = stock_fold_read.checkpoint_states(engine, company, moment)
 	rows = []
 	for balance in _closing_balances(company, moment):
 		row = frappe._dict(
@@ -116,7 +125,9 @@ def opening_delta(company: str, moment: str) -> list[frappe._dict]:
 		if stock_engine_bridge.policy_for(balance.item_code, engine) is None:
 			rows.append(row.update({"skipped": True}))
 			continue
-		state = stock_fold_read.state_as_of(balance.item_code, balance.warehouse, moment)
+		state = checkpoints.get((balance.item_code, balance.warehouse)) or stock_fold_read.state_as_of(
+			balance.item_code, balance.warehouse, moment
+		)
 		row.update(_engine_truth(engine, state))
 		row.delta = flt(row.engine_value - row.legacy_value, 6)
 		rows.append(row)
@@ -210,12 +221,7 @@ def _engine_truth(engine, state) -> dict:
 	]
 	if qty <= 0 or sum(seed.qty for seed in seeds) > qty + TOLERANCE:
 		seeds = []
-	if qty < 0:
-		rate = flt(state.exposure_rate)
-	else:
-		pool_qty = qty - sum(seed.qty for seed in seeds)
-		pool_value = value - sum(seed.qty * seed.rate for seed in seeds)
-		rate = pool_value / pool_qty if pool_qty > TOLERANCE else (value / qty if qty else 0.0)
+	rate = flt(state.exposure_rate) if qty < 0 else _pool_rate(qty, value, seeds)[0]
 	return {"engine_qty": qty, "engine_value": value, "rate": rate, "seeds": seeds}
 
 
@@ -266,19 +272,18 @@ def _legacy_seeds(balance: frappe._dict, report: dict) -> list[frappe._dict]:
 	if sum(flt(seed.qty) for seed in seeds) > flt(balance.qty) + TOLERANCE:
 		report["lot_mismatch"] += 1
 		return []
-	report["_lots_seeded"] = report.get("_lots_seeded", 0) + len(seeds)
+	report["lots_seeded"] += len(seeds)
 	return seeds
 
 
-def _pool_rate(balance: frappe._dict, seeds: list[frappe._dict], report: dict) -> float:
-	qty, value = flt(balance.qty), flt(balance.value)
+def _pool_rate(qty: float, value: float, seeds: list[frappe._dict]) -> tuple[float, float]:
+	"""(rate of the unlotted pool, value left unassigned when there is no pool)."""
 	lot_qty = sum(flt(seed.qty) for seed in seeds)
 	lot_value = sum(flt(seed.qty) * flt(seed.rate) for seed in seeds)
 	pool_qty = qty - lot_qty
 	if pool_qty > TOLERANCE:
-		return (value - lot_value) / pool_qty
-	report["pool_residual"] += value - lot_value
-	return value / qty if qty else 0.0
+		return (value - lot_value) / pool_qty, 0.0
+	return (value / qty if qty else 0.0), value - lot_value
 
 
 def _live_lots(item_code: str, warehouse: str) -> list[frappe._dict]:

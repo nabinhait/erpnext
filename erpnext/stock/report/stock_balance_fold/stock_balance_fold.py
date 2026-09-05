@@ -11,7 +11,7 @@ closings bound every read, so runtime does not grow with history depth."""
 import frappe
 from frappe import _
 
-from erpnext.stock.services import stock_fold_read
+from erpnext.stock.services import stock_engine_bridge, stock_fold_read
 
 
 def execute(filters=None):
@@ -34,7 +34,7 @@ def get_data(filters) -> list[dict]:
 		)
 
 		opening_qty = opening.qty if opening else 0.0
-		opening_val = _value(opening) if opening else 0.0
+		opening_val = stock_engine_bridge.equivalent_value(opening) if opening else 0.0
 		in_qty = sum(row["qty_change"] for row in window if row["qty_change"] > 0)
 		out_qty = -sum(row["qty_change"] for row in window if row["qty_change"] < 0)
 		in_val = sum(row["value_delta"] for row in window if row["value_delta"] > 0)
@@ -80,12 +80,6 @@ def _keys(filters) -> list[frappe._dict]:
 	if filters.get("warehouse"):
 		query = query.where(event.warehouse == filters.warehouse)
 	return query.orderby(event.item_code).orderby(event.warehouse).run(as_dict=True)
-
-
-def _value(state) -> float:
-	from erpnext.stock.services import stock_engine_bridge
-
-	return stock_engine_bridge.equivalent_value(state)
 
 
 def get_columns() -> list[dict]:

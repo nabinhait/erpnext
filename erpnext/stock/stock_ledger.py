@@ -106,48 +106,49 @@ def validate_stock_frozen_by_closing_entry(sl_entries):
 		get_closing_entry_for_closed_period,
 	)
 
-	company = sl_entries[0].get("company")
-	if not company:
-		company = frappe.get_cached_value("Warehouse", sl_entries[0].get("warehouse"), "company")
-
-	closing_entry = get_closing_entry_for_closed_period(company)
-	if not closing_entry:
-		return
-
-	for sle in sl_entries:
-		if sle.get("posting_date") and getdate(sle.get("posting_date")) <= getdate(closing_entry.to_date):
-			frappe.throw(
-				_(
-					"Stock transactions dated on or before {0} are frozen because the period is closed and the Stock Closing Entry {1} has been generated. To make changes, cancel the Period Closing Voucher first."
-				).format(
-					frappe.bold(format_date(closing_entry.to_date)),
-					get_link_to_form("Stock Closing Entry", closing_entry.name),
-				),
-				title=_("Stock Frozen"),
-			)
+	closing_entry = get_closing_entry_for_closed_period(_sle_company(sl_entries))
+	if closing_entry:
+		validate_not_dated_on_or_before(
+			sl_entries,
+			closing_entry.to_date,
+			_(
+				"Stock transactions dated on or before {0} are frozen because the period is closed and the Stock Closing Entry {1} has been generated. To make changes, cancel the Period Closing Voucher first."
+			).format(
+				frappe.bold(format_date(closing_entry.to_date)),
+				get_link_to_form("Stock Closing Entry", closing_entry.name),
+			),
+			_("Stock Frozen"),
+		)
 
 
 def validate_no_running_restatement(sl_entries):
 	from erpnext.stock.doctype.stock_restatement.stock_restatement import running_restatement
 
-	company = sl_entries[0].get("company") or frappe.get_cached_value(
+	restatement = running_restatement(_sle_company(sl_entries))
+	if restatement:
+		validate_not_dated_on_or_before(
+			sl_entries,
+			restatement.to_date,
+			_(
+				"Stock transactions dated on or before {0} are locked while Stock Restatement {1} restates the reopened period."
+			).format(
+				frappe.bold(format_date(restatement.to_date)),
+				get_link_to_form("Stock Restatement", restatement.name),
+			),
+			_("Period Being Restated"),
+		)
+
+
+def validate_not_dated_on_or_before(sl_entries, lock_date, message, title):
+	for sle in sl_entries:
+		if sle.get("posting_date") and getdate(sle.get("posting_date")) <= getdate(lock_date):
+			frappe.throw(message, title=title)
+
+
+def _sle_company(sl_entries):
+	return sl_entries[0].get("company") or frappe.get_cached_value(
 		"Warehouse", sl_entries[0].get("warehouse"), "company"
 	)
-	restatement = running_restatement(company)
-	if not restatement:
-		return
-
-	for sle in sl_entries:
-		if sle.get("posting_date") and getdate(sle.get("posting_date")) <= getdate(restatement.to_date):
-			frappe.throw(
-				_(
-					"Stock transactions dated on or before {0} are locked while Stock Restatement {1} restates the reopened period."
-				).format(
-					frappe.bold(format_date(restatement.to_date)),
-					get_link_to_form("Stock Restatement", restatement.name),
-				),
-				title=_("Period Being Restated"),
-			)
 
 
 def make_sl_entries(sl_entries, allow_negative_stock=False, via_landed_cost_voucher=False):

@@ -26,7 +26,6 @@ from frappe.utils import cint, flt
 from erpnext.stock.services import stock_engine_bridge
 
 REFOLD_CAP = 20000
-ASSERTING = ("Assertion",)
 
 
 def refold_for_event(
@@ -37,11 +36,10 @@ def refold_for_event(
 	from erpnext.stock.services import stock_fold_authority as authority
 
 	key = {"item_code": event_row.item_code, "warehouse": event_row.warehouse}
-	reason = authority.foldable_reason(key, allow_lots=True)
-	if reason == "cap":
-		return _value_now_queue_rest(engine, policy, event_row, args, allow_negative_stock)
-	if reason:
+	if not authority._history_foldable(key, allow_lots=True):
 		return None
+	if not authority.within_refold_cap(key):
+		return _value_now_queue_rest(engine, policy, event_row, args, allow_negative_stock)
 
 	baseline = authority._latest_baseline(key)
 	if baseline and str(event_row.posting_datetime) < str(baseline):
@@ -49,7 +47,16 @@ def refold_for_event(
 
 	anchor = (str(event_row.posting_datetime), cint(event_row.name))
 	rows = _rows_since(key, baseline)
-	return _refold_rows(engine, policy, key, rows, anchor, args, validate=(event_row, allow_negative_stock))
+	return _refold_rows(
+		engine,
+		policy,
+		key,
+		rows,
+		anchor,
+		args,
+		validate_event_id=cint(event_row.name),
+		allow_negative_stock=allow_negative_stock,
+	)
 
 
 def refold_key(item_code: str, warehouse: str, from_datetime: str, args: dict) -> bool:
@@ -60,7 +67,7 @@ def refold_key(item_code: str, warehouse: str, from_datetime: str, args: dict) -
 	engine = stock_engine_bridge.engine()
 	policy = stock_engine_bridge.policy_for(item_code, engine)
 	key = {"item_code": item_code, "warehouse": warehouse}
-	if policy is None or authority.foldable_reason(key, allow_lots=True, ignore_cap=True):
+	if policy is None or not authority._history_foldable(key, allow_lots=True):
 		return False
 
 	baseline = authority._latest_baseline(key)
@@ -77,6 +84,8 @@ def _value_now_queue_rest(engine, policy, event_row, args: dict, allow_negative_
 	from erpnext.stock.services import stock_fold_authority as authority
 	from erpnext.stock.services import stock_fold_read
 
+	if not event_row.sle:
+		return None  # only a ledger row can be valued on its own
 	state = stock_fold_read.state_before(engine, event_row)
 	allocations = None
 	if args.get("serial_and_batch_bundle"):
@@ -89,7 +98,9 @@ def _value_now_queue_rest(engine, policy, event_row, args: dict, allow_negative_
 	result = engine.replay([event], engine.FoldContext(policy=policy), start=state)
 	effect = result.effects[event.id]
 	authority._validate_negative(effect, args, allow_negative_stock)
-	authority._project_sle(event_row.sle, result.final, effect, policy, engine)
+	authority._project_sle(
+		event_row.sle, result.final, effect.qty_after, effect.value_after, effect.value_delta, policy, engine
+	)
 	enqueue_refold(
 		event_row.item_code,
 		event_row.warehouse,
@@ -132,10 +143,18 @@ def _rows_since(key: dict, baseline: str | None) -> list[frappe._dict]:
 
 
 def _refold_rows(
-	engine, policy, key: dict, rows: list, anchor: tuple, args: dict, validate=None
+	engine,
+	policy,
+	key: dict,
+	rows: list,
+	anchor: tuple,
+	args: dict,
+	validate_event_id: int | None = None,
+	allow_negative_stock: bool = False,
 ) -> str | None:
-	"""Fold the window around the anchor and rewrite what changed. ``validate``
-	is (event_row, allow_negative_stock) for the synchronous event path."""
+	"""Fold the window around the anchor and rewrite what changed; the
+	synchronous event path names the event whose effect is checked for
+	negative stock."""
 	from erpnext.stock.services import stock_fold_authority as authority
 
 	window = _refold_window(rows, anchor)
@@ -164,24 +183,31 @@ def _refold_rows(
 		return None
 
 	result = engine.replay(events, engine.FoldContext(policy=policy))
-	if validate:
-		event_row, allow_negative_stock = validate
-		authority._validate_negative(result.effects[cint(event_row.name)], args, allow_negative_stock)
+	if validate_event_id:
+		authority._validate_negative(result.effects[validate_event_id], args, allow_negative_stock)
 
 	live = _live_rows(key, changed_rows)
 	start_value = 0.0
 	if window[0] > 0:
-		start_value = _equivalent_value(result.states[cint(rows[0].name)])
+		start_value = stock_engine_bridge.equivalent_value(result.states[cint(rows[0].name)])
 	projections = _absorbed_projections(changed_rows, result, start_value)
 	for sle_name, projection in projections.items():
 		if sle_name in live:
-			_project_sle_values(sle_name, projection, policy, engine)
+			authority._project_sle(
+				sle_name,
+				projection["state"],
+				projection["qty_after"],
+				projection["value"],
+				projection["svd"],
+				policy,
+				engine,
+			)
 
 	if is_tail:
 		# the window reaches the present, so latest state and checkpoint move
-		authority._project_bin(frappe._dict(key), result.final)
 		last_id = max(cint(row.name) for row in rows)
-		authority._save_state(engine, frappe._dict({**key, "name": last_id}), result.final)
+		authority._project_bin(key["item_code"], key["warehouse"], result.final)
+		authority._save_state(engine, key["item_code"], key["warehouse"], last_id, result.final)
 
 	# history changed at this instant: checkpoints photographed at or after it
 	# are stale and must never seed a read; they rebuild at the next closing
@@ -231,13 +257,13 @@ def _refold_window(rows: list, anchor: tuple) -> tuple[int, int] | None:
 
 	start = 0
 	for index in range(inserted, -1, -1):
-		if rows[index].kind in ASSERTING:
+		if rows[index].kind == "Assertion":
 			start = index
 			break
 
 	end = len(rows)
 	for index in range(inserted + 1, len(rows)):
-		if rows[index].kind in ASSERTING:
+		if rows[index].kind == "Assertion":
 			end = index + 1
 			break
 
@@ -279,7 +305,7 @@ def _absorbed_projections(rows: list, result, start_value: float) -> dict:
 	index, total = 0, len(rows)
 
 	while index < total and not rows[index].sle:
-		prev_value = _equivalent_value(result.states[cint(rows[index].name)])
+		prev_value = stock_engine_bridge.equivalent_value(result.states[cint(rows[index].name)])
 		index += 1
 
 	while index < total:
@@ -288,7 +314,7 @@ def _absorbed_projections(rows: list, result, start_value: float) -> dict:
 		while tail + 1 < total and not rows[tail + 1].sle:
 			tail += 1
 		state = result.states[cint(rows[tail].name)]
-		value = _equivalent_value(state)
+		value = stock_engine_bridge.equivalent_value(state)
 		projections[row.sle] = {
 			"qty_after": result.effects[cint(row.name)].qty_after,
 			"value": value,
@@ -299,24 +325,6 @@ def _absorbed_projections(rows: list, result, start_value: float) -> dict:
 		index = tail + 1
 
 	return projections
-
-
-def _project_sle_values(sle_name: str, projection: dict, policy, engine) -> None:
-	from erpnext.stock.services import stock_ledger_writer
-
-	state = projection["state"]
-	layered = isinstance(policy, engine.Fifo | engine.Lifo)
-	stock_queue = [[layer.qty, layer.rate] for layer in state.layers] if layered else []
-	stock_ledger_writer.set_fields(
-		sle_name,
-		{
-			"qty_after_transaction": projection["qty_after"],
-			"valuation_rate": state.valuation_rate,
-			"stock_value": projection["value"],
-			"stock_value_difference": projection["svd"],
-			"stock_queue": json.dumps(stock_queue),
-		},
-	)
 
 
 def _post_gl_adjustment(args: dict, key: dict, projections: dict, live: dict) -> None:
@@ -357,8 +365,7 @@ def _post_gl_adjustment(args: dict, key: dict, projections: dict, live: dict) ->
 
 	gl_map = []
 	for (counter, posting_date), delta in sorted(deltas.items()):
-		gl_map.append(adjustment_row(args, warehouse_account, counter, delta, posting_date))
-		gl_map.append(adjustment_row(args, counter, warehouse_account, -delta, posting_date))
+		gl_map.extend(adjustment_pair(args, warehouse_account, counter, delta, posting_date))
 
 	if gl_map:
 		make_gl_entries(gl_map)
@@ -376,6 +383,14 @@ def _counter_account(voucher_type: str, voucher_no: str, warehouse_account: str)
 		"against",
 	)
 	return against.split(",")[0].strip() if against else None
+
+
+def adjustment_pair(args: dict, account: str, against: str, delta: float, posting_date: str) -> list:
+	"""The two GL rows moving ``delta`` into ``account`` from ``against``."""
+	return [
+		adjustment_row(args, account, against, delta, posting_date),
+		adjustment_row(args, against, account, -delta, posting_date),
+	]
 
 
 def adjustment_row(args: dict, account: str, against: str, debit: float, posting_date: str) -> frappe._dict:
@@ -410,7 +425,3 @@ def _regenerate_gl(args: dict, instant: str, live_sles) -> None:
 	current = (args.get("voucher_type"), args.get("voucher_no"))
 	vouchers = sorted({(sle.voucher_type, sle.voucher_no) for sle in live_sles} - {current})
 	repost_gle_for_stock_vouchers(vouchers, str(instant)[:10], company=args.get("company"))
-
-
-def _equivalent_value(state) -> float:
-	return stock_engine_bridge.equivalent_value(state)

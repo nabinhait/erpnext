@@ -6,6 +6,7 @@ from unittest.mock import patch
 import frappe
 from frappe.utils import add_days, flt, today
 
+from erpnext.stock import get_warehouse_account_map
 from erpnext.stock.doctype.item.test_item import make_item
 from erpnext.stock.doctype.stock_entry.stock_entry_utils import make_stock_entry
 from erpnext.stock.services import stock_ledger_writer
@@ -14,6 +15,7 @@ from erpnext.tests.utils import ERPNextTestSuite
 
 COMPANY = "_Test Opening Adjustment Company"
 ABBREVIATION = "TOAC"
+CLOSING_ENQUEUE = "erpnext.stock.doctype.stock_closing_entry.stock_closing_entry.enqueue"
 
 
 class TestStockOpeningAdjustment(ERPNextTestSuite):
@@ -23,8 +25,8 @@ class TestStockOpeningAdjustment(ERPNextTestSuite):
 		adjustment account on the first open day, pins the key at engine
 		values so the fold continues from there, and is cancelled — books
 		reversed, baseline revoked — only through its closing entry."""
-		company = _company()
-		warehouse = _warehouse("Opening Adjustment WH", company)
+		company = make_company(COMPANY, ABBREVIATION)
+		warehouse = make_warehouse("Opening Adjustment WH", company)
 		item = make_item(properties={"is_stock_item": 1, "valuation_method": "Moving Average"}).name
 		key = {"item_code": item, "warehouse": warehouse}
 		frontier = add_days(today(), -1)
@@ -42,7 +44,7 @@ class TestStockOpeningAdjustment(ERPNextTestSuite):
 			make_stock_entry(item_code=item, source=warehouse, qty=4, company=company, posting_date=frontier)
 			_drift_legacy_value(key, by=37)
 
-			closing = self._submit_closing(company, frontier)
+			closing = submit_closing(company, frontier)
 			adjustment = frappe.get_doc(
 				doctype="Stock Opening Adjustment", company=company, stock_closing_entry=closing.name
 			).insert()
@@ -99,8 +101,8 @@ class TestStockOpeningAdjustment(ERPNextTestSuite):
 	def test_threshold_gates_auto_submit(self):
 		"""within_threshold is the migration's go/no-go: set only when a
 		threshold exists and the absolute delta fits inside it."""
-		company = _company()
-		warehouse = _warehouse("Opening Threshold WH", company)
+		company = make_company(COMPANY, ABBREVIATION)
+		warehouse = make_warehouse("Opening Threshold WH", company)
 		item = make_item(properties={"is_stock_item": 1}).name
 		frontier = add_days(today(), -1)
 
@@ -110,7 +112,7 @@ class TestStockOpeningAdjustment(ERPNextTestSuite):
 				item_code=item, target=warehouse, qty=2, basic_rate=50, company=company, posting_date=frontier
 			)
 			_drift_legacy_value({"item_code": item, "warehouse": warehouse}, by=8)
-			closing = self._submit_closing(company, frontier)
+			closing = submit_closing(company, frontier)
 			adjustment = frappe.get_doc(
 				doctype="Stock Opening Adjustment", company=company, stock_closing_entry=closing.name
 			).insert()
@@ -124,55 +126,65 @@ class TestStockOpeningAdjustment(ERPNextTestSuite):
 			frappe.conf.pop("stock_event_dual_write", None)
 			frappe.db.set_single_value("Stock Settings", "opening_adjustment_threshold", 0)
 
-	def _submit_closing(self, company: str, to_date: str):
-		closing = frappe.get_doc(
-			doctype="Stock Closing Entry", company=company, from_date=add_days(to_date, -30), to_date=to_date
-		)
-		with patch("erpnext.stock.doctype.stock_closing_entry.stock_closing_entry.enqueue"):
-			closing.submit()
-		return closing
-
 	def _assert_gl_delta(self, adjustment, warehouse: str, expected: float) -> None:
-		from erpnext.stock import get_warehouse_account_map
-
-		stock_account = get_warehouse_account_map(adjustment.company)[warehouse].account
 		rows = frappe.get_all(
-			"GL Entry",
-			filters={"voucher_no": adjustment.name, "is_cancelled": 0},
-			fields=["account", "debit", "credit", "posting_date"],
+			"GL Entry", filters={"voucher_no": adjustment.name, "is_cancelled": 0}, pluck="posting_date"
 		)
-		balance = {}
-		for row in rows:
-			balance[row.account] = flt(balance.get(row.account)) + flt(row.debit) - flt(row.credit)
-			self.assertEqual(row.posting_date, adjustment.posting_date)
-		self.assertAlmostEqual(flt(balance.get(stock_account)), expected, places=2)
-		self.assertAlmostEqual(flt(balance.get(adjustment.adjustment_account)), -expected, places=2)
+		self.assertTrue(all(posting_date == adjustment.posting_date for posting_date in rows))
+		self.assertAlmostEqual(
+			stock_account_balance(adjustment.company, warehouse, adjustment.name), expected, places=2
+		)
+		adjustment_balance = _account_balance(adjustment.adjustment_account, adjustment.name)
+		self.assertAlmostEqual(adjustment_balance, -expected, places=2)
 
 
-def _company() -> str:
-	if not frappe.db.exists("Company", COMPANY):
+def make_company(name: str, abbreviation: str) -> str:
+	if not frappe.db.exists("Company", name):
 		frappe.get_doc(
 			doctype="Company",
-			company_name=COMPANY,
-			abbr=ABBREVIATION,
+			company_name=name,
+			abbr=abbreviation,
 			default_currency="INR",
 			country="India",
 			chart_of_accounts="Standard",
 			enable_perpetual_inventory=1,
 		).insert()
-	return COMPANY
+	return name
 
 
-def _warehouse(name: str, company: str) -> str:
-	full_name = f"{name} - {ABBREVIATION}"
+def make_warehouse(name: str, company: str) -> str:
+	abbreviation = frappe.get_cached_value("Company", company, "abbr")
+	full_name = f"{name} - {abbreviation}"
 	if not frappe.db.exists("Warehouse", full_name):
 		frappe.get_doc(
 			doctype="Warehouse",
 			warehouse_name=name,
 			company=company,
-			parent_warehouse=f"All Warehouses - {ABBREVIATION}",
+			parent_warehouse=f"All Warehouses - {abbreviation}",
 		).insert()
 	return full_name
+
+
+def submit_closing(company: str, to_date: str):
+	closing = frappe.get_doc(
+		doctype="Stock Closing Entry", company=company, from_date=add_days(to_date, -30), to_date=to_date
+	)
+	with patch(CLOSING_ENQUEUE):
+		closing.submit()
+	return closing
+
+
+def stock_account_balance(company: str, warehouse: str, voucher_no: str | None = None) -> float:
+	"""Net debit of the warehouse's stock account, optionally for one voucher."""
+	return _account_balance(get_warehouse_account_map(company)[warehouse].account, voucher_no)
+
+
+def _account_balance(account: str, voucher_no: str | None = None) -> float:
+	filters = {"account": account, "is_cancelled": 0}
+	if voucher_no:
+		filters["voucher_no"] = voucher_no
+	rows = frappe.get_all("GL Entry", filters=filters, fields=["debit", "credit"])
+	return flt(sum(flt(row.debit) - flt(row.credit) for row in rows))
 
 
 def _drift_legacy_value(key: dict, by: float) -> None:

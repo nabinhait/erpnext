@@ -109,9 +109,13 @@ def _try_fold(args: dict, allow_negative_stock: bool) -> str | None:
 	effect = result.effects[event.id]
 	_validate_negative(effect, args, allow_negative_stock)
 
-	_project_sle(event_row.sle, result.final, effect, policy, engine)
-	_project_bin(event_row, result.final)
-	_save_state(engine, event_row, result.final, checkpoint)
+	_project_sle(
+		event_row.sle, result.final, effect.qty_after, effect.value_after, effect.value_delta, policy, engine
+	)
+	_project_bin(event_row.item_code, event_row.warehouse, result.final)
+	_save_state(
+		engine, event_row.item_code, event_row.warehouse, cint(event_row.name), result.final, checkpoint
+	)
 	return APPENDED
 
 
@@ -145,40 +149,36 @@ def _allocations(event_names: list) -> dict[str, list[frappe._dict]]:
 	return grouped
 
 
-def _equivalent_value(state) -> float:
-	from erpnext.stock.services import stock_engine_bridge
-
-	return stock_engine_bridge.equivalent_value(state)
-
-
 def _history_foldable(key: dict, allow_lots: bool = False) -> bool:
-	return foldable_reason(key, allow_lots) is None
+	"""Complete event history since the last baseline (an SLE-less assertion
+	pinning legacy's stored balance — everything behind it is frozen) and,
+	when the key is lot-tracked, free of reconciliations after it (a legacy
+	reco resets the aggregate but cannot reconstruct lots; a baseline seeds
+	them)."""
+	since = _since_baseline(key)
+	if _events_since(key, since) < frappe.db.count("Stock Ledger Entry", {**key, "is_cancelled": 0, **since}):
+		return False
+	if not _key_has_bundles(key):
+		return True
+	if not allow_lots:
+		return False
+	return not frappe.db.exists("Stock Event", {**key, "kind": "Assertion", "sle": ("is", "set"), **since})
 
 
-def foldable_reason(key: dict, allow_lots: bool = False, ignore_cap: bool = False) -> str | None:
-	"""Why the key's history cannot be folded synchronously, or None.
-
-	"cap": more events since the last baseline than a sync refold may take
-	(the queued refold handles it); "incomplete": a live SLE since the
-	baseline has no event; "lots": a lot-tracked key carrying a legacy
-	reconciliation after the baseline (a reco resets the aggregate but
-	cannot reconstruct lots; only a baseline seeds them). History behind a
-	baseline is frozen and never counted."""
-	baseline = _latest_baseline(key)
-	since = {"posting_datetime": (">", str(baseline))} if baseline else {}
-	events = frappe.db.count("Stock Event", {**key, **since})
-	if events < frappe.db.count("Stock Ledger Entry", {**key, "is_cancelled": 0, **since}):
-		return "incomplete"
-	if _key_has_bundles(key):
-		if not allow_lots:
-			return "lots"
-		if frappe.db.exists("Stock Event", {**key, "kind": "Assertion", "sle": ("is", "set"), **since}):
-			return "lots"
+def within_refold_cap(key: dict) -> bool:
+	"""Few enough events since the baseline for a synchronous refold."""
 	from erpnext.stock.services.stock_fold_refold import REFOLD_CAP
 
-	if not ignore_cap and events > REFOLD_CAP:
-		return "cap"
-	return None
+	return _events_since(key, _since_baseline(key)) <= REFOLD_CAP
+
+
+def _since_baseline(key: dict) -> dict:
+	baseline = _latest_baseline(key)
+	return {"posting_datetime": (">", str(baseline))} if baseline else {}
+
+
+def _events_since(key: dict, since: dict) -> int:
+	return frappe.db.count("Stock Event", {**key, **since})
 
 
 def _latest_baseline(key: dict) -> str | None:
@@ -319,7 +319,8 @@ def can_revalue(item_code: str, warehouse: str) -> bool:
 	engine = stock_engine_bridge.engine()
 	if _policy_for(engine, item_code) is None:
 		return False
-	return _history_foldable({"item_code": item_code, "warehouse": warehouse}, allow_lots=True)
+	key = {"item_code": item_code, "warehouse": warehouse}
+	return _history_foldable(key, allow_lots=True) and within_refold_cap(key)
 
 
 def post_revaluation_gl(
@@ -349,10 +350,7 @@ def post_revaluation_gl(
 	)
 	args = {"voucher_type": voucher_type, "voucher_no": voucher_no, "company": company}
 	make_gl_entries(
-		[
-			refold.adjustment_row(args, warehouse_account, credit_account, value_change, posting_date),
-			refold.adjustment_row(args, credit_account, warehouse_account, -value_change, posting_date),
-		]
+		refold.adjustment_pair(args, warehouse_account, credit_account, value_change, posting_date)
 	)
 
 
@@ -445,41 +443,13 @@ def _rebuild(engine, event_row: frappe._dict) -> tuple:
 	key yet. History behind a baseline is frozen and never replayed.
 	"""
 	from erpnext.stock.services import stock_engine_bridge
+	from erpnext.stock.services.stock_fold_refold import _rows_since
 
 	key = {"item_code": event_row.item_code, "warehouse": event_row.warehouse}
-	if not _history_foldable(key, allow_lots=True):
+	if not (_history_foldable(key, allow_lots=True) and within_refold_cap(key)):
 		return None, 0
 
-	baseline = _latest_baseline(key)
-	filters = dict(key)
-	if baseline:
-		filters["posting_datetime"] = (">=", str(baseline))
-	rows = [
-		row
-		for row in _drop_revoked_baselines(
-			frappe.get_all(
-				"Stock Event",
-				filters=filters,
-				fields=[
-					"name",
-					"item_code",
-					"posting_datetime",
-					"kind",
-					"qty_change",
-					"declared_rate",
-					"assert_qty",
-					"assert_rate",
-					"reverses_event",
-					"value_change",
-					"sle",
-					"voucher_type",
-					"voucher_no",
-				],
-				order_by="posting_datetime, name",
-			)
-		)
-		if cint(row.name) != cint(event_row.name)
-	]
+	rows = [row for row in _rows_since(key, _latest_baseline(key)) if cint(row.name) != cint(event_row.name)]
 
 	bundle_rows = _bundle_backed_sles(key)
 	allocations = _allocations([row.name for row in rows])
@@ -522,8 +492,8 @@ def _validate_negative(effect, args: dict, allow_negative_stock: bool) -> None:
 	)
 
 
-def _project_sle(sle_name: str, state, effect, policy, engine) -> None:
-	"""Write one event's fold result into the legacy SLE projection."""
+def _project_sle(sle_name: str, state, qty_after: float, value: float, svd: float, policy, engine) -> None:
+	"""Write a fold result into the legacy SLE projection."""
 	from erpnext.stock.services import stock_ledger_writer
 
 	layered = isinstance(policy, engine.Fifo | engine.Lifo)
@@ -532,20 +502,20 @@ def _project_sle(sle_name: str, state, effect, policy, engine) -> None:
 	stock_ledger_writer.set_fields(
 		sle_name,
 		{
-			"qty_after_transaction": effect.qty_after,
+			"qty_after_transaction": qty_after,
 			"valuation_rate": state.valuation_rate,
-			"stock_value": effect.value_after,
-			"stock_value_difference": effect.value_delta,
+			"stock_value": value,
+			"stock_value_difference": svd,
 			"stock_queue": json.dumps(stock_queue),
 		},
 	)
 
 
-def _project_bin(event_row: frappe._dict, final_state) -> None:
+def _project_bin(item_code: str, warehouse: str, final_state) -> None:
 	from erpnext.stock.services import bin_writer
 	from erpnext.stock.utils import get_or_make_bin
 
-	bin_name = get_or_make_bin(event_row.item_code, event_row.warehouse)
+	bin_name = get_or_make_bin(item_code, warehouse)
 	bin_writer.set_fields(
 		bin_name,
 		{
@@ -556,16 +526,18 @@ def _project_bin(event_row: frappe._dict, final_state) -> None:
 	)
 
 
-def _save_state(engine, event_row: frappe._dict, state, checkpoint: str | None = None) -> None:
+def _save_state(
+	engine, item_code: str, warehouse: str, last_event: int, state, checkpoint: str | None = None
+) -> None:
 	from erpnext.stock.services import stock_engine_bridge
 
-	_warn_on_lot_cardinality(event_row, state)
+	_warn_on_lot_cardinality(item_code, warehouse, state)
 	payload = {
-		"last_event": cint(event_row.name),
+		"last_event": last_event,
 		"state_json": json.dumps(stock_engine_bridge.serialize_state(state)),
 	}
 	existing = checkpoint or frappe.db.get_value(
-		"Stock Fold State", {"item_code": event_row.item_code, "warehouse": event_row.warehouse}, "name"
+		"Stock Fold State", {"item_code": item_code, "warehouse": warehouse}, "name"
 	)
 	if existing:
 		frappe.db.set_value("Stock Fold State", existing, payload, update_modified=True)
@@ -574,8 +546,8 @@ def _save_state(engine, event_row: frappe._dict, state, checkpoint: str | None =
 	timestamp = frappe.utils.now()
 	row = {
 		"name": frappe.generate_hash(length=10),
-		"item_code": event_row.item_code,
-		"warehouse": event_row.warehouse,
+		"item_code": item_code,
+		"warehouse": warehouse,
 		**payload,
 		"creation": timestamp,
 		"modified": timestamp,
@@ -585,14 +557,14 @@ def _save_state(engine, event_row: frappe._dict, state, checkpoint: str | None =
 	frappe.db.bulk_insert("Stock Fold State", tuple(row), [list(row.values())])
 
 
-def _warn_on_lot_cardinality(event_row: frappe._dict, state) -> None:
+def _warn_on_lot_cardinality(item_code: str, warehouse: str, state) -> None:
 	"""The state blob is rewritten whole on every fold, so cost grows with the
 	number of valuation-participating lots. Announce the scale problem before
 	it hurts; the designed escape hatch is per-lot state rows (§2.6)."""
 	lots = len(state.lots)
 	if lots > LOT_CARDINALITY_GUARDRAIL:
 		frappe.logger("stock_fold").warning(
-			f"{event_row.item_code}/{event_row.warehouse} folds {lots} lot sub-states "
+			f"{item_code}/{warehouse} folds {lots} lot sub-states "
 			f"(guardrail {LOT_CARDINALITY_GUARDRAIL}); state blob rewrites are O(lots) — "
 			"consider quantity-tag semantics for this item or per-lot state storage"
 		)

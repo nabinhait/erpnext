@@ -115,6 +115,12 @@ def to_event(
 	)
 
 
+def end_of_day(date) -> str:
+	"""The last instant of a date in the fold's total order — where closings,
+	checkpoints and frontiers sit."""
+	return f"{date} 23:59:59.999999"
+
+
 def equivalent_value(state) -> float:
 	"""The engine state's value in legacy terms. The engine already nets a
 	negative balance's exposure (qty x provisional rate) out of ``value``,

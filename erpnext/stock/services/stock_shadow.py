@@ -149,7 +149,7 @@ def run(
 			if effect is None or stored is None:
 				continue
 
-			shadow_value = _legacy_equivalent_value(result.states[cint(row.name)])
+			shadow_value = stock_engine_bridge.equivalent_value(result.states[cint(row.name)])
 			qty_delta = abs(effect.qty_after - flt(stored.qty_after_transaction))
 			value_delta = abs(shadow_value - flt(stored.stock_value))
 
@@ -234,7 +234,7 @@ def _match_hybrid(rows, agg_result, lot_result, legacy, value_tolerance):
 		stored = legacy.get(row.sle)
 		if stored is None:
 			continue
-		agg_value = _legacy_equivalent_value(agg_result.states[cint(row.name)])
+		agg_value = stock_engine_bridge.equivalent_value(agg_result.states[cint(row.name)])
 		if abs(agg_value - flt(stored.stock_value)) > band:
 			boundary = index
 			break
@@ -247,7 +247,7 @@ def _match_hybrid(rows, agg_result, lot_result, legacy, value_tolerance):
 	)
 	if previous is None:
 		return None
-	offset = flt(previous.stock_value) - _legacy_equivalent_value(
+	offset = flt(previous.stock_value) - stock_engine_bridge.equivalent_value(
 		lot_result.states[cint(rows[boundary - 1].name)]
 	)
 
@@ -255,7 +255,7 @@ def _match_hybrid(rows, agg_result, lot_result, legacy, value_tolerance):
 		stored = legacy.get(row.sle)
 		if stored is None:
 			continue
-		lot_value = _legacy_equivalent_value(lot_result.states[cint(row.name)])
+		lot_value = stock_engine_bridge.equivalent_value(lot_result.states[cint(row.name)])
 		if row.kind == "Assertion":
 			# a reconciliation snaps the stored balance to the count, resetting
 			# the seeded gap — recalibrate here and nowhere else
@@ -276,7 +276,7 @@ def _has_misfits(rows, result, legacy, qty_tolerance, value_tolerance) -> bool:
 		state = result.states[cint(row.name)]
 		if abs(effect.qty_after - flt(stored.qty_after_transaction)) > qty_tolerance * 1000:
 			return True
-		if abs(_legacy_equivalent_value(state) - flt(stored.stock_value)) > value_tolerance * 10:
+		if abs(stock_engine_bridge.equivalent_value(state) - flt(stored.stock_value)) > value_tolerance * 10:
 			return True
 	return False
 
@@ -310,10 +310,6 @@ def _legacy_rows(sle_names: list[str]) -> dict[str, frappe._dict]:
 		],
 	)
 	return {row.name: row for row in rows}
-
-
-def _legacy_equivalent_value(state) -> float:
-	return stock_engine_bridge.equivalent_value(state)
 
 
 def _legacy_inconsistent(rows, legacy: dict, qty_tolerance: float) -> bool:
@@ -369,7 +365,9 @@ def diagnose(item_code: str, warehouse: str, limit: int = 12) -> list[dict]:
 		effect = result.effects.get(cint(row.name))
 		if not stored or not effect:
 			continue
-		delta = abs(_legacy_equivalent_value(result.states[cint(row.name)]) - flt(stored.stock_value))
+		delta = abs(
+			stock_engine_bridge.equivalent_value(result.states[cint(row.name)]) - flt(stored.stock_value)
+		)
 		if not diverged and delta <= 0.05:
 			continue
 		diverged = True

@@ -6,9 +6,11 @@ from unittest.mock import patch
 import frappe
 from frappe.utils import add_days, flt, today
 
-from erpnext.stock import get_warehouse_account_map
 from erpnext.stock.doctype.item.test_item import make_item
 from erpnext.stock.doctype.stock_entry.stock_entry_utils import make_stock_entry
+from erpnext.stock.doctype.stock_opening_adjustment.test_stock_opening_adjustment import (
+	stock_account_balance,
+)
 from erpnext.stock.doctype.stock_refold import stock_refold
 from erpnext.stock.doctype.warehouse.test_warehouse import create_warehouse
 from erpnext.stock.services import stock_fold_refold
@@ -74,7 +76,7 @@ class TestStockFoldRefold(ERPNextTestSuite):
 				frappe.db.get_value("Bin", {"item_code": item, "warehouse": warehouse}, "stock_value")
 			)
 			self.assertAlmostEqual(stock_value, queued_rows[-1].stock_value, places=4)
-			self.assertAlmostEqual(self._stock_account_balance(warehouse), stock_value, places=2)
+			self.assertAlmostEqual(stock_account_balance(COMPANY, warehouse), stock_value, places=2)
 
 	def _scenario(self, item: str, warehouse: str) -> str:
 		"""Three receipts, an issue, then a receipt backdated between them.
@@ -107,10 +109,3 @@ class TestStockFoldRefold(ERPNextTestSuite):
 			fields=["actual_qty", "qty_after_transaction", "stock_value", "stock_value_difference"],
 			order_by="posting_datetime, creation, name",
 		)
-
-	def _stock_account_balance(self, warehouse: str) -> float:
-		account = get_warehouse_account_map(COMPANY)[warehouse].account
-		rows = frappe.get_all(
-			"GL Entry", filters={"account": account, "is_cancelled": 0}, fields=["debit", "credit"]
-		)
-		return flt(sum(flt(row.debit) - flt(row.credit) for row in rows))

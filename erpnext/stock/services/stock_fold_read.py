@@ -31,37 +31,57 @@ CHECKPOINT_BATCH = 500
 def state_as_of(item_code: str, warehouse: str, as_of: str):
 	"""The key's fold state at a moment: nearest checkpoint plus folded tail."""
 	engine = stock_engine_bridge.engine()
-	checkpoint = _nearest_checkpoint(item_code, warehouse, as_of)
-
-	start, after = None, None
-	if checkpoint:
-		start = stock_engine_bridge.deserialize_state(engine, json.loads(checkpoint.state_json))
-		after = checkpoint.as_of
-
+	start, after = _start_state(engine, item_code, warehouse, as_of)
 	events = _events(engine, item_code, warehouse, after=after, upto=as_of)
 	result = engine.replay(events, engine.FoldContext(policy=_policy(engine, item_code)), start=start)
 	return result.final
 
 
 def state_before(engine, event_row: frappe._dict):
-	"""The key's fold state just before this event in the total order
-	(nearest checkpoint plus the tail up to, excluding, the event)."""
-	checkpoint = _nearest_checkpoint(
-		event_row.item_code, event_row.warehouse, str(event_row.posting_datetime)
-	)
-	start, after = None, None
-	if checkpoint:
-		start = stock_engine_bridge.deserialize_state(engine, json.loads(checkpoint.state_json))
-		after = checkpoint.as_of
-
+	"""The key's fold state just before this event in the total order: the
+	nearest checkpoint, else the last assertion (which reconstructs the state
+	from empty), plus the tail up to, excluding, the event."""
 	anchor = (str(event_row.posting_datetime), cint(event_row.name))
+	start, after = _start_state(engine, event_row.item_code, event_row.warehouse, anchor[0])
+	since = None if start else _last_assertion_key(event_row.item_code, event_row.warehouse, anchor)
 	events = [
 		event
-		for event in _events(engine, event_row.item_code, event_row.warehouse, after=after, upto=anchor[0])
+		for event in _events(
+			engine, event_row.item_code, event_row.warehouse, after=after, upto=anchor[0], since=since
+		)
 		if (str(event.posting_datetime), event.id) < anchor
 	]
 	policy = _policy(engine, event_row.item_code)
 	return engine.replay(events, engine.FoldContext(policy=policy), start=start).final
+
+
+def _start_state(engine, item_code: str, warehouse: str, as_of: str) -> tuple:
+	"""(state, as_of) of the nearest checkpoint, or (None, None)."""
+	checkpoint = _nearest_checkpoint(item_code, warehouse, as_of)
+	if not checkpoint:
+		return None, None
+	return stock_engine_bridge.deserialize_state(engine, json.loads(checkpoint.state_json)), checkpoint.as_of
+
+
+def _last_assertion_key(item_code: str, warehouse: str, anchor: tuple) -> tuple | None:
+	from erpnext.stock.services.stock_fold_authority import _drop_revoked_baselines
+
+	rows = _drop_revoked_baselines(
+		frappe.get_all(
+			"Stock Event",
+			filters={
+				"item_code": item_code,
+				"warehouse": warehouse,
+				"kind": "Assertion",
+				"posting_datetime": ("<=", anchor[0]),
+			},
+			fields=["name", "posting_datetime", "kind", "sle", "voucher_type", "voucher_no"],
+			order_by="posting_datetime desc, name desc",
+			limit=5,
+		)
+	)
+	keys = [(str(row.posting_datetime), cint(row.name)) for row in rows]
+	return next((key for key in keys if key < anchor), None)
 
 
 def ledger_rows(item_code: str, warehouse: str, from_dt: str, to_dt: str) -> list[dict]:
@@ -127,11 +147,11 @@ def create_checkpoints(company: str, to_date, closing_entry: str | None = None) 
 	fall back to the older checkpoint, so sparse keys cost nothing per period.
 	"""
 	engine = stock_engine_bridge.engine()
-	as_of = str(to_date) + " 23:59:59.999999"
+	as_of = stock_engine_bridge.end_of_day(to_date)
 	created = 0
 	buffer: list[dict] = []
 
-	for key in _active_keys(company, as_of):
+	for key in active_keys(company, as_of):
 		checkpoint = _nearest_checkpoint(key.item_code, key.warehouse, as_of)
 		after = checkpoint.as_of if checkpoint else None
 
@@ -150,7 +170,7 @@ def create_checkpoints(company: str, to_date, closing_entry: str | None = None) 
 		result = engine.replay(events, engine.FoldContext(policy=policy), start=start)
 		from erpnext.stock.services.stock_fold_authority import _warn_on_lot_cardinality
 
-		_warn_on_lot_cardinality(key, result.final)
+		_warn_on_lot_cardinality(key.item_code, key.warehouse, result.final)
 		buffer.append(
 			{
 				"name": frappe.generate_hash(length=10),
@@ -216,25 +236,56 @@ def _nearest_checkpoint(item_code: str, warehouse: str, as_of: str):
 	return rows[0] if rows else None
 
 
-def _active_keys(company: str, as_of: str) -> list[frappe._dict]:
+def active_keys(company: str, as_of: str | None = None, after: str | None = None) -> list[frappe._dict]:
+	"""Distinct (item, warehouse) keys of the company with events in the window."""
 	event = frappe.qb.DocType("Stock Event")
-	return (
+	query = (
 		frappe.qb.from_(event)
 		.select(event.item_code, event.warehouse)
 		.distinct()
-		.where((event.company == company) & (event.posting_datetime <= as_of))
-		.orderby(event.item_code)
-		.orderby(event.warehouse)
+		.where(event.company == company)
+	)
+	if as_of:
+		query = query.where(event.posting_datetime <= as_of)
+	if after:
+		query = query.where(event.posting_datetime > after)
+	return query.orderby(event.item_code).orderby(event.warehouse).run(as_dict=True)
+
+
+def checkpoint_states(engine, company: str, as_of: str) -> dict:
+	"""Every key's checkpointed state at exactly this instant, keyed by
+	(item_code, warehouse) — one query instead of one per key."""
+	checkpoint = frappe.qb.DocType("Stock Fold Checkpoint")
+	warehouse = frappe.qb.DocType("Warehouse")
+	rows = (
+		frappe.qb.from_(checkpoint)
+		.join(warehouse)
+		.on(warehouse.name == checkpoint.warehouse)
+		.select(checkpoint.item_code, checkpoint.warehouse, checkpoint.state_json)
+		.where((warehouse.company == company) & (checkpoint.as_of == as_of))
 	).run(as_dict=True)
+	return {
+		(row.item_code, row.warehouse): stock_engine_bridge.deserialize_state(
+			engine, json.loads(row.state_json)
+		)
+		for row in rows
+	}
 
 
 def _policy(engine, item_code: str):
 	return stock_engine_bridge.policy_for(item_code, engine)
 
 
-def _events(engine, item_code: str, warehouse: str, after=None, upto=None) -> list:
+def _events(
+	engine, item_code: str, warehouse: str, after=None, upto=None, since: tuple | None = None
+) -> list:
+	"""Engine events of the key in the window: after (exclusive) .. upto
+	(inclusive), or from the sort key ``since`` (inclusive) when given."""
 	filters = {"item_code": item_code, "warehouse": warehouse}
-	if after and upto:
+	if since:
+		after = None
+		filters["posting_datetime"] = ("between", [since[0], str(upto)]) if upto else (">=", since[0])
+	elif after and upto:
 		filters["posting_datetime"] = ("between", [str(after), str(upto)])
 	elif after:
 		filters["posting_datetime"] = (">", str(after))
@@ -263,6 +314,8 @@ def _events(engine, item_code: str, warehouse: str, after=None, upto=None) -> li
 	)
 	if after:
 		rows = [row for row in rows if str(row.posting_datetime) > str(after)]
+	if since:
+		rows = [row for row in rows if (str(row.posting_datetime), cint(row.name)) >= since]
 
 	from erpnext.stock.services.stock_fold_authority import _drop_revoked_baselines
 

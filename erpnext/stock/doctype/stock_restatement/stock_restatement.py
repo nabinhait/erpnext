@@ -23,6 +23,8 @@ from frappe.model.document import Document
 from frappe.utils import add_days, flt
 from frappe.utils.background_jobs import enqueue
 
+from erpnext.stock.services import stock_engine_bridge
+
 RUNNING = ("Queued", "In Progress")
 
 
@@ -51,7 +53,7 @@ class StockRestatement(Document):
 
 	@property
 	def moment(self) -> str:
-		return f"{self.from_date} 23:59:59.999999"
+		return stock_engine_bridge.end_of_day(self.from_date)
 
 
 def running_restatement(company: str) -> frappe._dict | None:
@@ -162,15 +164,9 @@ def _adjust(doc: StockRestatement, closing_name: str) -> str:
 
 
 def _queue_keys(doc: StockRestatement) -> None:
-	from erpnext.stock.doctype.stock_refold.stock_refold import enqueue_refold
+	from erpnext.stock.doctype.stock_refold.stock_refold import enqueue_refolds
+	from erpnext.stock.services.stock_fold_read import active_keys
 
-	event = frappe.qb.DocType("Stock Event")
-	keys = (
-		frappe.qb.from_(event)
-		.select(event.item_code, event.warehouse)
-		.distinct()
-		.where((event.company == doc.company) & (event.posting_datetime > doc.moment))
-	).run(as_dict=True)
-	for key in keys:
-		enqueue_refold(key.item_code, key.warehouse, doc.company, doc.moment, restatement=doc.name)
+	keys = active_keys(doc.company, after=doc.moment)
+	enqueue_refolds(keys, doc.company, doc.moment, doc.name)
 	doc.db_set("keys_total", len(keys))

@@ -136,26 +136,21 @@ class StockClosingEntry(Document):
 		self.set_status(save=True)
 		self.remove_stock_closing()
 		if self.cancel_opening_adjustments():
-			self.start_restatement()
+			# this closing was the frontier: reopening restates the year and
+			# slides the frontier one closing back
+			from erpnext.stock.doctype.stock_restatement.stock_restatement import start_for_closing
 
-	def cancel_opening_adjustments(self) -> list[str]:
+			start_for_closing(self)
+
+	def cancel_opening_adjustments(self) -> bool:
 		"""Reopening the period takes its frontier adjustment with it: the
 		value delta is reversed and the baselines it owns stop locking."""
 		adjustments = frappe.get_all(
 			"Stock Opening Adjustment", {"stock_closing_entry": self.name, "docstatus": 1}, pluck="name"
 		)
 		for name in adjustments:
-			adjustment = frappe.get_doc("Stock Opening Adjustment", name)
-			adjustment.flags.via_closing_cancel = True
-			adjustment.cancel()
-		return adjustments
-
-	def start_restatement(self):
-		"""This closing was the frontier: reopening it restates the year to
-		engine truth and slides the frontier one closing back."""
-		from erpnext.stock.doctype.stock_restatement.stock_restatement import start_for_closing
-
-		start_for_closing(self)
+			frappe.get_doc("Stock Opening Adjustment", name).cancel()
+		return bool(adjustments)
 
 	def validate_closed_period_lock(self):
 		pcv = frappe.db.get_value(
