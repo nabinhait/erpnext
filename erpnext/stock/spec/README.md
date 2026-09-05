@@ -1,5 +1,12 @@
 # Implementation notes for Stock Ledger
 
+> **The stock ledger is being redesigned** (event-sourced fold engine, v17).
+> See `stock_engine_redesign.md` (architecture + decisions),
+> `stock_engine_program_log.md` (implementation log + current status), and
+> `stock_ledger_decommission.md` (v17 breaking changes). The engine itself is
+> vendored at `erpnext/stock/engine/`. The notes below describe the legacy
+> implementation.
+
 
 ## Important files
 
