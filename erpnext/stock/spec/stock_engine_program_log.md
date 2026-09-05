@@ -820,3 +820,12 @@ rebased stack: engine 63, authority 13, fold-read 4, event 2, closing
 (5dabceaa). Force-pushed (safety tag pre-rebase-2026-09-05 = old tip
 a8341050). test2 and apnaklub still on pre-rebase schema: bench migrate
 needed there before next use.
+
+2026-09-05 (later) — Upstream PR wave, migration fixes: four draft PRs
+opened against frappe/erpnext develop (cherry-picked via worktree while
+apnaklub migration ran): #58773 asset depreciation schedule patch,
+#58774 reporting-currency unset guard, #58775 acc_frozen_upto guards
+(3 patches), #58776 tax-withholding column guard. The fifth apnaklub
+fix (asset-type checkboxes) was already fixed upstream independently
+as #58416 — no PR needed. Remaining upstream items: write-guard logger
+→ v16, the 3 legacy report defects, #57980.
