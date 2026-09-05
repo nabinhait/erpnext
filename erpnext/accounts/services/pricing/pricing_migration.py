@@ -209,12 +209,30 @@ class PricingRuleConverter:
 
 
 @frappe.whitelist()
+def get_migration_status() -> dict:
+	"""Counts for the migration assistant's status header."""
+	frappe.only_for(("System Manager", "Accounts Manager"))
+	converted = _converted_rule_names()
+	total = frappe.db.count("Pricing Rule")
+	return {
+		"engine": frappe.get_cached_value("Accounts Settings", None, "pricing_engine") or "Legacy",
+		"total_rules": total,
+		"converted": len(converted),
+		"pending": total - len(converted),
+		"disabled_conversions": frappe.db.count(
+			"Pricing Scheme", {"legacy_pricing_rule": ("is", "set"), "disabled": 1}
+		),
+	}
+
+
+@frappe.whitelist()
 def convert_legacy_pricing_rules(dry_run: int = 1) -> dict:
 	"""Convert every not-yet-converted legacy Pricing Rule. Idempotent:
 	rules already linked from a Pricing Scheme are skipped. Conflicting
 	conversions are inserted disabled and flagged for review: disabling
 	a live discount silently would itself be a behavior change, but so
 	would letting two same-priority schemes race (spec section 13.1)."""
+	frappe.only_for(("System Manager", "Accounts Manager"))
 	dry_run = cint(dry_run)
 	rules = _pending_rules()
 	_ensure_stacking_groups(rules, dry_run)
@@ -254,6 +272,9 @@ def _insert_scheme(scheme_dict: dict, converter: PricingRuleConverter) -> str:
 	try:
 		doc.insert(ignore_permissions=True)
 	except frappe.ValidationError:
+		# the conversion handles the conflict by inserting disabled, so the
+		# already-queued throw message must not surface as an error dialog
+		frappe.clear_last_message()
 		doc.disabled = 1
 		doc.insert(ignore_permissions=True)
 		converter._review("conflicts with another converted scheme; inserted disabled, resolve priority")
@@ -312,12 +333,20 @@ def replay_recent_documents(days: int = 90, limit: int = 100) -> dict:
 	combination-dependent legacy behavior (spec section 13.3). Run after
 	conversion, before cutover.
 	"""
+	frappe.only_for(("System Manager", "Accounts Manager"))
 	from erpnext.accounts.services.pricing.pricing_applier import baseline_rate
 	from erpnext.accounts.services.pricing.pricing_context import build_pricing_context
 	from erpnext.accounts.services.pricing.pricing_effects import compose_line_rate
 	from erpnext.accounts.services.pricing.pricing_engine import PricingEngine
 
-	report = {"documents_checked": 0, "lines_checked": 0, "lines_changed": 0, "total_delta": 0.0, "diffs": []}
+	report = {
+		"documents_checked": 0,
+		"lines_checked": 0,
+		"lines_changed": 0,
+		"engine_priced_lines": 0,
+		"total_delta": 0.0,
+		"diffs": [],
+	}
 	for doctype, docname in _recent_documents(cint(days), cint(limit)):
 		doc = frappe.get_doc(doctype, docname)
 		context = build_pricing_context(doc)
@@ -354,6 +383,11 @@ def _diff_document(doc, context, result, report: dict, compose_line_rate, baseli
 	priceable_keys = {line.key for line in context.priceable_lines()}
 	for item in doc.get("items"):
 		if item.name not in priceable_keys:
+			continue
+		if item.get("pricing_scheme") or flt(item.get("scheme_discount_amount")):
+			# already priced by the new engine; differences here reflect
+			# scheme edits since, not legacy migration risk
+			report["engine_priced_lines"] += 1
 			continue
 		report["lines_checked"] += 1
 		new_rate = flt(

@@ -798,6 +798,19 @@ class TestPricingSchemeMigration(ERPNextTestSuite):
 
 		return convert_legacy_pricing_rules(dry_run=dry_run)
 
+	def test_migration_status_counts(self):
+		from erpnext.accounts.services.pricing.pricing_migration import get_migration_status
+
+		make_legacy_rule(title="Status Rule")
+		before = get_migration_status()
+		self.assertEqual(before["pending"] + before["converted"], before["total_rules"])
+		self.assertGreaterEqual(before["pending"], 1)
+
+		self.convert()
+		after = get_migration_status()
+		self.assertEqual(after["pending"], 0)
+		self.assertEqual(after["converted"], after["total_rules"])
+
 	def entry_for(self, report: dict, rule_name: str) -> dict:
 		return next(e for e in report["converted"] if e["rule"] == rule_name)
 
@@ -868,12 +881,14 @@ class TestPricingSchemeMigration(ERPNextTestSuite):
 	def test_conflicting_conversion_inserted_disabled(self):
 		make_legacy_rule(title="First")
 		rule_b = make_legacy_rule(title="Second")  # same scope, same priority; legacy allowed this
+		frappe.clear_messages()
 		report = self.convert()
 
 		entry = self.entry_for(report, rule_b.name)
 		self.assertEqual(entry["classification"], "needs review")
 		scheme = frappe.get_doc("Pricing Scheme", entry["schemes"][0])
 		self.assertEqual(scheme.disabled, 1, "conflicting conversion lands disabled for review")
+		self.assertFalse(frappe.message_log, "handled conflicts must not leak error dialogs to the user")
 
 	def test_replay_reports_rate_delta(self):
 		frappe.db.set_single_value("Accounts Settings", "pricing_engine", "Legacy")

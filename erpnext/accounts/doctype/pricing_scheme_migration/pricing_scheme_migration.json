@@ -1,0 +1,84 @@
+{
+ "actions": [],
+ "creation": "2026-08-03 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "convert_section",
+  "conversion_report",
+  "replay_section",
+  "replay_days",
+  "column_break_replay",
+  "replay_limit",
+  "replay_results_section",
+  "replay_report"
+ ],
+ "fields": [
+  {
+   "description": "Creates a Pricing Scheme for every Pricing Rule that has not been converted yet. A dry run only reports; nothing is inserted.",
+   "fieldname": "convert_section",
+   "fieldtype": "Section Break",
+   "label": "Convert Legacy Rules"
+  },
+  {
+   "fieldname": "conversion_report",
+   "fieldtype": "HTML"
+  },
+  {
+   "description": "Reprices recent submitted orders and invoices with the new engine, read-only, and lists every line where the rate would differ from what was charged.",
+   "fieldname": "replay_section",
+   "fieldtype": "Section Break",
+   "hide_border": 1,
+   "label": "Replay Recent Documents"
+  },
+  {
+   "default": "90",
+   "fieldname": "replay_days",
+   "fieldtype": "Int",
+   "label": "Days to Look Back",
+   "non_negative": 1
+  },
+  {
+   "fieldname": "column_break_replay",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "100",
+   "fieldname": "replay_limit",
+   "fieldtype": "Int",
+   "label": "Documents per Type",
+   "non_negative": 1
+  },
+  {
+   "fieldname": "replay_results_section",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "replay_report",
+   "fieldtype": "HTML"
+  }
+ ],
+ "hide_toolbar": 1,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-08-03 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Accounts",
+ "name": "Pricing Scheme Migration",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Accounts Manager",
+   "write": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

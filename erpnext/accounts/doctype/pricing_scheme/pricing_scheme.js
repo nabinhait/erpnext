@@ -410,13 +410,31 @@ function render_overlaps(frm, overlaps) {
 		return;
 	}
 
-	const colors = { conflict: "red", shadowed: "orange", wins: "orange", stacks: "blue" };
-	overlaps.forEach((o) => {
-		body.append(`
-			<div class="flex align-center" style="gap: 8px; padding: 3px 0;">
-				<span class="indicator ${colors[o.severity]}"></span>
+	const groups = [
+		{ severity: "conflict", color: "red", label: __("Conflict, saving will be blocked") },
+		{ severity: "shadowed", color: "orange", label: __("Win over this scheme") },
+		{ severity: "wins", color: "gray", label: __("Lose to this scheme") },
+		{ severity: "stacks", color: "blue", label: __("Combine with this scheme") },
+	];
+	groups.forEach((group) => {
+		const entries = overlaps.filter((o) => o.severity === group.severity);
+		if (!entries.length) return;
+		const rows = entries
+			.map(
+				(o) => `
 				<a href="/app/pricing-scheme/${o.scheme}">${frappe.utils.escape_html(o.title)}</a>
-				<span class="text-muted small">${frappe.utils.escape_html(o.detail)}</span>
+				<span class="text-muted small">${frappe.utils.escape_html(o.evidence || "")}</span>`
+			)
+			.join("");
+		body.append(`
+			<div style="margin-bottom: 10px;">
+				<div style="margin-bottom: 3px;">
+					<span class="indicator ${group.color}">${group.label} (${entries.length})</span>
+				</div>
+				<div style="display: grid; grid-template-columns: max-content 1fr;
+					column-gap: 12px; row-gap: 3px; padding-left: 20px; align-items: baseline;">
+					${rows}
+				</div>
 			</div>`);
 	});
 	frm.dashboard.show();

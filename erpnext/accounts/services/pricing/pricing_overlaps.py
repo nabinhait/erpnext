@@ -111,22 +111,16 @@ def _classify(doc, other) -> dict | None:
 
 	evidence = _intersection_evidence(_effective_trigger_rows(doc), _effective_trigger_rows(other))
 	if doc.stacking_group != other.stacking_group:
-		return _entry(
-			other, "stacks", _("combines with this scheme for {0}, different offer group").format(evidence)
-		)
+		return _entry(other, "stacks", evidence)
 	if cint(doc.priority) == cint(other.priority):
-		return _entry(
-			other,
-			"conflict",
-			_("has the same group and priority for {0}, saving will be blocked").format(evidence),
-		)
+		return _entry(other, "conflict", evidence)
 	if cint(doc.priority) < cint(other.priority):
-		return _entry(other, "shadowed", _("wins over this scheme for {0}").format(evidence))
-	return _entry(other, "wins", _("loses to this scheme for {0}").format(evidence))
+		return _entry(other, "shadowed", evidence)
+	return _entry(other, "wins", evidence)
 
 
-def _entry(other, severity: str, detail: str) -> dict:
-	return {"scheme": other.name, "title": other.title, "severity": severity, "detail": detail}
+def _entry(other, severity: str, evidence: str) -> dict:
+	return {"scheme": other.name, "title": other.title, "severity": severity, "evidence": evidence}
 
 
 def _windows_overlap(a, b) -> bool:
@@ -160,11 +154,19 @@ def _describe_intersection(a, b) -> str:
 		return _("all items")
 	if "All Items" in (a.scope_type, b.scope_type) or (a.scope_type, a.value) == (b.scope_type, b.value):
 		return _describe_scope_row(b if a.scope_type == "All Items" else a)
-	return _("items in both {0} and {1}").format(_describe_scope_row(a), _describe_scope_row(b))
+	if a.scope_type == "Item":
+		return a.value
+	if b.scope_type == "Item":
+		return b.value
+	return _("{0} and {1}").format(_describe_scope_row(a), _describe_scope_row(b))
 
 
 def _describe_scope_row(row) -> str:
-	return f"{_(row.scope_type)} {row.value}"
+	if row.scope_type == "Item Group":
+		return _("the {0} group").format(row.value)
+	if row.scope_type == "Brand":
+		return _("the {0} brand").format(row.value)
+	return row.value
 
 
 def _scope_rows_intersect(a, b) -> bool:
