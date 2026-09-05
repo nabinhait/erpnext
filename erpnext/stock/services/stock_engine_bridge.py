@@ -105,9 +105,7 @@ def to_event(
 		posting_datetime=row.posting_datetime,
 		kind=kind,
 		qty_change=flt(row.qty_change),
-		declared_rate=flt(row.declared_rate)
-		if flt(row.qty_change) > 0
-		else (flt(row.declared_rate) or None),
+		declared_rate=flt(row.declared_rate) if flt(row.qty_change) > 0 else (flt(row.declared_rate) or None),
 		assert_qty=flt(row.assert_qty) if row.kind == "Assertion" else None,
 		assert_rate=flt(row.assert_rate) if row.kind == "Assertion" else None,
 		reverses_event=cint(row.reverses_event) or None,
@@ -115,6 +113,15 @@ def to_event(
 		allocations=tuple(_to_allocation(eng, alloc) for alloc in allocations or []),
 		rate_buckets=rate_buckets,
 	)
+
+
+def equivalent_value(state) -> float:
+	"""The engine state's value in legacy terms. The engine already nets a
+	negative balance's exposure (qty x provisional rate) out of ``value``,
+	exactly the negative stock value legacy carries — so this is the value
+	itself; the helper exists so no caller subtracts the exposure a second
+	time."""
+	return state.value
 
 
 def serialize_state(state) -> dict:

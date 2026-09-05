@@ -50,14 +50,18 @@ def ledger_rows(item_code: str, warehouse: str, from_dt: str, to_dt: str) -> lis
 	events = _events(engine, item_code, warehouse, after=from_dt, upto=to_dt)
 	result = engine.replay(events, engine.FoldContext(policy=_policy(engine, item_code)), start=opening)
 
-	meta = {
-		cint(row.name): row
-		for row in frappe.get_all(
-			"Stock Event",
-			filters={"name": ("in", [event.id for event in events])},
-			fields=["name", "voucher_type", "voucher_no", "voucher_detail_no", "sle"],
-		)
-	} if events else {}
+	meta = (
+		{
+			cint(row.name): row
+			for row in frappe.get_all(
+				"Stock Event",
+				filters={"name": ("in", [event.id for event in events])},
+				fields=["name", "voucher_type", "voucher_no", "voucher_detail_no", "sle"],
+			)
+		}
+		if events
+		else {}
+	)
 
 	rows = []
 	for event in sorted(events, key=lambda e: e.sort_key):
@@ -74,7 +78,7 @@ def ledger_rows(item_code: str, warehouse: str, from_dt: str, to_dt: str) -> lis
 				"kind": event.kind.value,
 				"qty_change": event.qty_change,
 				"qty_after": effect.qty_after,
-				"value_after": state.value - state.exposure_qty * state.exposure_rate,
+				"value_after": stock_engine_bridge.equivalent_value(state),
 				"value_delta": effect.value_delta,
 				"valuation_rate": state.valuation_rate,
 			}
@@ -106,7 +110,7 @@ def create_checkpoints(company: str, to_date, closing_entry: str | None = None) 
 	created = 0
 	buffer: list[dict] = []
 
-	for index, key in enumerate(_active_keys(company, as_of)):
+	for key in _active_keys(company, as_of):
 		checkpoint = _nearest_checkpoint(key.item_code, key.warehouse, as_of)
 		after = checkpoint.as_of if checkpoint else None
 
@@ -167,7 +171,12 @@ def _flush_checkpoints(buffer: list[dict]) -> None:
 		"owner",
 		"modified_by",
 	)
-	audit = {"creation": timestamp, "modified": timestamp, "owner": "Administrator", "modified_by": "Administrator"}
+	audit = {
+		"creation": timestamp,
+		"modified": timestamp,
+		"owner": "Administrator",
+		"modified_by": "Administrator",
+	}
 	values = [[({**row, **audit}).get(field) for field in fields] for row in buffer]
 	frappe.db.bulk_insert("Stock Fold Checkpoint", fields, values)
 	buffer.clear()

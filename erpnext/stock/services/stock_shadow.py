@@ -313,13 +313,7 @@ def _legacy_rows(sle_names: list[str]) -> dict[str, frappe._dict]:
 
 
 def _legacy_equivalent_value(state) -> float:
-	"""Project the engine state onto legacy value semantics.
-
-	The engine models a negative balance as exposure (provisional rate, value
-	held at zero until covered — §2.10); legacy carries it as negative stock
-	value. Legacy-equivalent value = value - exposure.
-	"""
-	return state.value - state.exposure_qty * state.exposure_rate
+	return stock_engine_bridge.equivalent_value(state)
 
 
 def _legacy_inconsistent(rows, legacy: dict, qty_tolerance: float) -> bool:

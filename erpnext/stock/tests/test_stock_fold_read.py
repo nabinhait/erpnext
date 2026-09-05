@@ -178,3 +178,28 @@ class TestStockFoldRead(ERPNextTestSuite):
 		self.assertEqual(ageing["compared"], 1)
 		self.assertEqual(ageing["qty_matched"], 1)
 		self.assertEqual(ageing["age_within_5d"], 1, msg=str(ageing))
+
+	def test_negative_balance_reads_carry_exposure_value(self):
+		"""An uncovered issue leaves the key negative: the engine already
+		values that exposure at the provisional rate, so a read must report
+		exactly that — never subtract the exposure a second time."""
+		item = make_item(properties={"is_stock_item": 1, "valuation_method": "Moving Average"}).name
+		warehouse = create_warehouse("Fold Read Exposure WH")
+
+		previous = frappe.db.get_single_value("Stock Settings", "allow_negative_stock")
+		frappe.db.set_single_value("Stock Settings", "allow_negative_stock", 1)
+		frappe.conf.stock_event_dual_write = 1
+		try:
+			make_stock_entry(item_code=item, target=warehouse, qty=5, rate=80)
+			make_stock_entry(item_code=item, source=warehouse, qty=8)
+		finally:
+			frappe.conf.pop("stock_event_dual_write", None)
+			frappe.db.set_single_value("Stock Settings", "allow_negative_stock", previous)
+
+		state = stock_fold_read.state_as_of(item, warehouse, today() + " 23:59:59")
+		self.assertAlmostEqual(state.qty, -3, places=4)
+		self.assertAlmostEqual(state.value, -240, places=4)
+
+		rows = stock_fold_read.ledger_rows(item, warehouse, "1900-01-01", today() + " 23:59:59")
+		self.assertAlmostEqual(rows[-1]["qty_after"], -3, places=4)
+		self.assertAlmostEqual(rows[-1]["value_after"], -240, places=4)

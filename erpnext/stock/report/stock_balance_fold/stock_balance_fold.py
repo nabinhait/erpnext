@@ -83,13 +83,21 @@ def _keys(filters) -> list[frappe._dict]:
 
 
 def _value(state) -> float:
-	return state.value - state.exposure_qty * state.exposure_rate
+	from erpnext.stock.services import stock_engine_bridge
+
+	return stock_engine_bridge.equivalent_value(state)
 
 
 def get_columns() -> list[dict]:
 	return [
 		{"label": _("Item"), "fieldname": "item_code", "fieldtype": "Link", "options": "Item", "width": 160},
-		{"label": _("Warehouse"), "fieldname": "warehouse", "fieldtype": "Link", "options": "Warehouse", "width": 160},
+		{
+			"label": _("Warehouse"),
+			"fieldname": "warehouse",
+			"fieldtype": "Link",
+			"options": "Warehouse",
+			"width": 160,
+		},
 		{"label": _("Opening Qty"), "fieldname": "opening_qty", "fieldtype": "Float", "width": 100},
 		{"label": _("Opening Value"), "fieldname": "opening_val", "fieldtype": "Float", "width": 110},
 		{"label": _("In Qty"), "fieldname": "in_qty", "fieldtype": "Float", "width": 90},

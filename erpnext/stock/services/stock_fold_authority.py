@@ -265,7 +265,9 @@ def _closed_until(company: str):
 
 
 def _equivalent_value(state) -> float:
-	return state.value - state.exposure_qty * state.exposure_rate
+	from erpnext.stock.services import stock_engine_bridge
+
+	return stock_engine_bridge.equivalent_value(state)
 
 
 def _absorbed_projections(rows: list, result, start_value: float) -> dict:
