@@ -1,17 +1,17 @@
 # M2 / Phase 0 — SLE and Bin write-path audit (+ program log)
 
-## ⟲ Session-restart snapshot — 2026-09-05
+## ⟲ Session-restart snapshot — 2026-09-05 (evening)
 
 **Where everything is:**
-- **One program branch: `stock-ledger-redesign`** (origin = nabinhait/erpnext), tip `5dabceaa`,
-  54 commits, freshly **rebased onto upstream develop** (5beed5f4, Sep 5). frappe fast-forwarded
+- **One program branch: `stock-ledger-redesign`** (origin = nabinhait/erpnext), tip `3dc25fb8`
+  (Opening Adjustment), rebased onto upstream develop (5beed5f4, Sep 5). frappe fast-forwarded
   to `b56649ed` (Sep 4) — required by new erpnext. Safety tag `pre-rebase-2026-09-05` = old tip.
   The old stock-ledger-cutover name and the M2–M4-only branch are gone (renamed/deleted).
 - **Engine is vendored**: `erpnext/stock/engine/` (63 frappe-runner tests incl. property suite;
   purity gate = source-scan test). Standalone repo archived at `~/bench-cli/stock_engine-archive`
   (harnesses benchmark/ + sle_replay/ live only there).
-- **Sites**: test-runner-site migrated + full battery green (engine 63, authority 13, fold-read 4,
-  event 2, closing 7). **test2 and apnaklub are on pre-rebase schema — `bench migrate` needed
+- **Sites**: test-runner-site migrated + full battery green (engine 63, authority 13, fold-read 5,
+  event 2, closing 7, opening adjustment 2). **test2 and apnaklub are on pre-rebase schema — `bench migrate` needed
   before next use** (apnaklub deliberately: last migration surfaced 5 patch bugs; those are now
   upstream, but a month of new patches + frappe jump is untested there).
 - **Flags on test2**: dual_write, fold_authoritative, suppress_legacy_repost, gl_adjustment.
@@ -20,7 +20,14 @@
   cutover plan (Part 4) and all of this week's decisions (§2.6 batch/serial semantics, §2.10
   freeze-the-past). Plan file for the engine merge: `~/.claude/plans/` (done, historical).
 
-**Settled this week (all recorded in the design doc):** v17 = no shadow, SLE absorbs Stock Event,
+**Decided 2026-09-05 (Nabin): the Stock Event table is NOT merged into SLE yet** — the
+dual-write + shadow stack is the verification instrument for the production sites he will run it
+on first. The absorption design (fact columns + sequence-backed event_id + allocation child table
+on SLE, in-place stamping patch, cancelled rows as Reversal facts) is worked out and deferred, not
+rejected; every v17 build item is built against the Stock Event table until he says otherwise.
+
+**Settled this week (all recorded in the design doc):** v17 = no shadow, SLE absorbs Stock Event
+(deferred — see above),
 frozen frontier + opening adjustment, reopen-restates-the-year; batches = flag decides sub-fold vs
 quantity tag, pools never borrow, flag fixed at birth (set_only_once upstream); serials = never in
 fold state, `use_serialwise_valuation` picks pool rate vs per-serial rate buckets; negative stock =
@@ -29,14 +36,16 @@ entry docstatus); dimensions = event attributes, qty as sums; checkpoints schedu
 closings manual locks.
 
 **Next steps (priority order):**
-1. **v17 migration patch** — SLE absorbs Stock Event (+ sequence id), one resumable full fold,
-   FY-boundary checkpoints, frontier closing entry, current-FY refold.
-2. **Opening Adjustment doctype** — wraps freeze_baseline + GL delta, threshold-gated, owned by
-   the frontier closing entry.
-3. **Reopen-restatement job** — cancel of frontier closing enqueues year restatement (today it
-   only revokes the lock; values refold lazily).
-4. **REFOLD_CAP overflow → queued background refold** (v17 has no legacy fallback).
-5. **apnaklub**: migrate, then freeze_baseline dry run over 90k keys (first scale test).
+1. **Production verification runs (Nabin)** — dual-write + shadow on real sites; shadow's
+   negative_exposure bucket must be re-read after the d3363f56 fix (it was inflated).
+2. **Reopen-restatement job** — cancel of frontier closing enqueues year restatement (today it
+   cancels the Opening Adjustment and revokes the lock; values refold lazily).
+3. **REFOLD_CAP overflow → queued background refold** (v17 has no legacy fallback).
+4. **v17 migration patch** — one resumable full fold, FY-boundary checkpoints, frontier closing
+   entry, Opening Adjustment (auto-submit within threshold, else stop), current-FY refold. The
+   SLE-absorbs-Stock-Event schema step is deferred until the production runs are done.
+5. **apnaklub**: Opening Adjustment compute dry run over 90k keys (first scale test of
+   opening_delta + the attached breakdown; child table holds differing keys only).
 6. **Lint debt**: pre-commit hangs → every commit used --no-verify; fix hook, re-lint branch.
 7. Upstream wave: write-guard logger → v16 PR; remaining migration/report fixes; #57980.
 8. Gameplan post — blocked on user running `frappectl auth login` in a real terminal.
@@ -837,3 +846,49 @@ labels added to #58773-76; #58416 already followed that path. Both
 sites migrated onto the rebased stack: test2 clean; apnaklub clean,
 exit 0, zero patch failures — the original five-bug gauntlet now passes
 end-to-end with our four fixes + upstream's #58416.
+
+2026-09-05 (evening, decision) — "SLE absorbs Stock Event" started (schema
+moves for fact columns + event_id sequence + allocation child table) and
+was STOPPED by Nabin: "don't merge the stock event table into SLE now, I
+will still run this into some real production sites to verify the
+results." Reverted before any commit. Design worked out that session,
+kept for later: fact columns on SLE (event_id from a standalone sequence,
+kind incl. Baseline, declared_rate, assert_qty/rate, reverses_event,
+value_change), allocations as a child table of SLE with rename-cron
+cascade, cancelled originals + reversal rows both facts (kind Reversal
+paired by voucher/detail/-qty), in-place stamping patch with Python-side
+reversal pairing, Revaluation rows projected with svd 0 (uplift absorbed
+into the preceding receipt row as today).
+
+2026-09-05 (evening, fix) — Exposure double-subtraction (d3363f56): the
+engine's State.value already nets -exposure_qty*exposure_rate, yet
+_equivalent_value (authority refold projections), shadow's
+_legacy_equivalent_value, ledger_rows and the Stock Balance (fold) report
+subtracted it again — a key at -3 @ 80 read -480. Verified with a bare
+engine replay. One helper now (stock_engine_bridge.equivalent_value =
+identity), all callers through it, regression test in test_stock_fold_read.
+Consequence for the production runs: shadow's negative_exposure counts
+on apnaklub were inflated; rerun before citing them.
+
+2026-09-05 (evening, build) — Stock Opening Adjustment (3dc25fb8): the
+v17 frontier document. Fields: company, stock_closing_entry (owner, must
+be submitted), moment = closing to_date 23:59:59.999999, posting_date =
+to_date + 1, adjustment_account (default Company.stock_adjustment_account),
+keys/skipped_keys (Standard Cost), total_delta, threshold (new Stock
+Settings.opening_adjustment_threshold), within_threshold, items table
+(differing keys only). compute() enqueues build(): opening_delta folds
+every key via state_as_of, full per-key result attached as gz JSON.
+Submit: emit_baselines at engine values owned by the adjustment (batch
+seeds from fold lots; dropped when negative/overshoot), GL Dr/Cr stock
+account vs adjustment account netted per account on posting_date, Bins
+shifted by the deltas. Cancel: only via the closing entry's cancel
+(before_cancel guard; closing.on_cancel cascades with
+flags.via_closing_cancel), reverse GL, un-shift bins, drop fold state.
+_baseline_active now checks any owner's docstatus. stock_fold_cutover
+split: emit_baselines (shared) + freeze_baseline (legacy pins) +
+opening_delta (engine truth). Tests on a dedicated company: drift of 37
+booked exactly, baseline 6 @ 100, fold continues from it (issue 1 →
+svd -100), threshold gating (0/5/10 vs |−8|), closing cancel cascades.
+Open: 90k-key scale of build() (single request in the long queue, one
+attachment), and whether the child table should cap rows.
+

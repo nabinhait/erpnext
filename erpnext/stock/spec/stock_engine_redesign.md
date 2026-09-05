@@ -1443,8 +1443,9 @@ write logger.
 *Status 2026-09-05: M0–M6 built and validated (real-data gates on apnaklub passed; see
 `stock_engine_program_log.md` for the program log and current resume snapshot). Sequencing below is
 superseded by "The v17 cutover: frozen frontier" section for everything from M4's gate onward —
-remaining build: the v17 migration patch, Opening Adjustment doctype, reopen-restatement job,
-refold overflow queue. Branch: `stock-ledger-redesign`, rebased on develop, engine vendored at
+Stock Opening Adjustment built 2026-09-05 (3dc25fb8); remaining build: reopen-restatement job,
+refold overflow queue, the v17 migration patch. The SLE-absorbs-Stock-Event schema step is deferred
+(Nabin, 2026-09-05) until the dual-write + shadow stack has been verified on production sites. Branch: `stock-ledger-redesign`, rebased on develop, engine vendored at
 `erpnext/stock/engine/`.*
 
 The phases below, re-sequenced with the POC-first approach from the internal discussion. The fold
@@ -1482,7 +1483,9 @@ the engine correct and books the difference once, visibly, at the open-period bo
 collapses four open decisions (residue acceptance, legacy-wrong correction, per-company approval,
 shadow duration) into one auditable artifact.
 
-**One table.** `Stock Ledger Entry` absorbs the Stock Event fields and *is* the facts table —
+**One table.** *(Deferred 2026-09-05: the Stock Event table stays until dual-write + shadow have been
+verified on real production sites; the design below is worked out and waiting.)* `Stock Ledger
+Entry` absorbs the Stock Event fields and *is* the facts table —
 declared fields authoritative, valuation columns kept but demoted to recomputable projections, plus
 a sequence-backed numeric id for the `(posting_datetime, id)` total order. The separate Stock Event
 doctype was scaffolding for the dual-write/shadow era and does not ship. Every integration that
@@ -1497,7 +1500,11 @@ reads SLE keeps working.
 3. Posts the **opening adjustment** at current-FY start: a first-class document owning its baseline
    assertion facts (lot-seeded, negative balances as exposure) and one GL delta entry — engine
    truth vs legacy stored, item-wise breakdown attached. Above a configurable delta threshold the
-   migration **stops and asks** instead of silently booking.
+   migration **stops and asks** instead of silently booking. *Built: `Stock Opening Adjustment`
+   (3dc25fb8) — owned by the frontier Stock Closing Entry, baselines at engine values, GL netted per
+   stock account against `Company.stock_adjustment_account` on the first open day, Bins shifted,
+   `within_threshold` from `Stock Settings.opening_adjustment_threshold`; cancelled only through
+   its closing entry.*
 4. **Refolds the current FY** (sites migrate mid-year) from the corrected opening — an open-period
    rewrite, legally fine, bounded by one year of volume.
 5. Closed years keep legacy's stored values byte-for-byte, wrong or not.
