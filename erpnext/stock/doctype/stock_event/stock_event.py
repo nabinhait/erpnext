@@ -5,7 +5,7 @@
 
 Facts record only what the business declared (quantity moved, declared rate,
 counted balance); no derived valuation ever lands here. Rows are written
-exclusively by ``erpnext.stock.services.stock_event_emitter`` (dual-write and
+exclusively by ``erpnext.stock.services.stock_event_writer`` (dual-write and
 backfill); nothing edits or renames them afterwards. The order key is
 ``(posting_datetime, name)`` where ``name`` is the auto-increment id.
 """
@@ -48,8 +48,8 @@ class StockEvent(Document):
 	# end: auto-generated types
 
 	def on_update(self):
-		if not self.flags.via_stock_event_emitter:
-			frappe.throw(_("Stock Events are immutable facts and can only be written by the emitter"))
+		if not self.flags.via_stock_event_writer:
+			frappe.throw(_("Stock Events are immutable facts and can only be written by the event writer"))
 
 
 def on_doctype_update():

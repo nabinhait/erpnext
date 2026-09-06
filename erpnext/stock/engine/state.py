@@ -1,4 +1,4 @@
-"""Fold state and effects. qty and value are computed, never stored — they cannot drift.
+"""Engine state and effects. qty and value are computed, never stored — they cannot drift.
 
 State memoises its aggregate (qty, value) per instance: the memo is derived from
 the frozen fields by one fixed arithmetic path, is excluded from equality and
@@ -109,7 +109,7 @@ class LotState:
 
 
 @dataclass(frozen=True, slots=True)
-class Effect:
+class EventEffect:
 	"""What one event did. Reported to the caller (GL, projections), never fed back in."""
 
 	event_id: int

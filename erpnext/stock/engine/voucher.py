@@ -2,7 +2,7 @@
 
 A transfer's receiving leg cannot carry a rate up front — its rate IS the
 outgoing leg's realized cost, which only the fold can compute. CostLinkedLeg
-models that leg as a spec; fold_voucher realizes it into an ordinary Event
+models that leg as a spec; apply_voucher realizes it into an ordinary Event
 once its source has folded, so coupled legs share one number in memory and
 nothing is ever written back into a document.
 """
@@ -13,11 +13,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
-from .context import FoldContext
+from .apply import apply_event
+from .context import EngineContext
 from .event import Event, EventKind
-from .fold import fold
 from .lots import Allocation
-from .state import Effect, State
+from .state import EventEffect, State
 
 _KIND_ORDER = {
 	EventKind.REVERSAL: 0,
@@ -95,14 +95,14 @@ class VoucherResult:
 	the facts that would be persisted. effects is parallel to realized_legs."""
 
 	states: dict[str, State]
-	effects: tuple[Effect, ...]
+	effects: tuple[EventEffect, ...]
 	realized_legs: tuple[Leg, ...]
 
 
-def fold_voucher(
+def apply_voucher(
 	states: Mapping[str, State],
 	voucher: Voucher,
-	context: FoldContext | Mapping[str, FoldContext],
+	context: EngineContext | Mapping[str, EngineContext],
 ) -> VoucherResult:
 	"""Fold every leg of one voucher against `states` (missing key = State()).
 
@@ -111,15 +111,15 @@ def fold_voucher(
 	folds after its source, and a source folds after cost-linked inflows to
 	its own key — which is what lets a chain A->B->C fold correctly. A cyclic
 	dependency (such as a swap A<->B in one voucher) raises ValueError.
-	`context` is one FoldContext for every key, or a mapping covering each key.
+	`context` is one EngineContext for every key, or a mapping covering each key.
 	"""
 	new_states = dict(states)
-	effects: list[Effect] = []
+	effects: list[EventEffect] = []
 	realized: list[Leg] = []
-	effects_by_id: dict[int, Effect] = {}
-	for leg in _ordered_legs(voucher):
-		event = leg.event if isinstance(leg, Leg) else _realize(leg, effects_by_id)
-		state, effect = fold(new_states.get(leg.key, State()), event, _context_for(context, leg.key))
+	effects_by_id: dict[int, EventEffect] = {}
+	for leg in _order_legs_by_dependency(voucher):
+		event = leg.event if isinstance(leg, Leg) else _realize_leg(leg, effects_by_id)
+		state, effect = apply_event(new_states.get(leg.key, State()), event, _context_for(context, leg.key))
 		new_states[leg.key] = state
 		effects_by_id[event.id] = effect
 		effects.append(effect)
@@ -127,7 +127,7 @@ def fold_voucher(
 	return VoucherResult(new_states, tuple(effects), tuple(realized))
 
 
-def _realize(leg: CostLinkedLeg, effects_by_id: dict[int, Effect]) -> Event:
+def _realize_leg(leg: CostLinkedLeg, effects_by_id: dict[int, EventEffect]) -> Event:
 	consumed_rate = effects_by_id[leg.cost_from].consumed_rate
 	if consumed_rate is None:
 		raise ValueError(f"source leg {leg.cost_from} yielded no consumed_rate")
@@ -142,10 +142,10 @@ def _realize(leg: CostLinkedLeg, effects_by_id: dict[int, Effect]) -> Event:
 	)
 
 
-def _ordered_legs(voucher: Voucher) -> list[VoucherLeg]:
+def _order_legs_by_dependency(voucher: Voucher) -> list[VoucherLeg]:
 	"""Base order (kind, id), each leg deferred until its dependencies folded."""
 	by_id = _legs_by_id(voucher)
-	_validate_links(voucher, by_id)
+	_validate_cost_links(voucher, by_id)
 	dependencies = _dependencies(voucher, by_id)
 	pending = sorted(voucher.legs, key=lambda leg: (_KIND_ORDER[leg.kind], leg.id))
 	ordered: list[VoucherLeg] = []
@@ -167,7 +167,7 @@ def _legs_by_id(voucher: Voucher) -> dict[int, VoucherLeg]:
 	return by_id
 
 
-def _validate_links(voucher: Voucher, by_id: dict[int, VoucherLeg]) -> None:
+def _validate_cost_links(voucher: Voucher, by_id: dict[int, VoucherLeg]) -> None:
 	claimed: dict[int, float] = {}
 	for leg in voucher.legs:
 		if not isinstance(leg, CostLinkedLeg):
@@ -192,5 +192,5 @@ def _dependencies(voucher: Voucher, by_id: dict[int, VoucherLeg]) -> dict[int, s
 	return dependencies
 
 
-def _context_for(context: FoldContext | Mapping[str, FoldContext], key: str) -> FoldContext:
-	return context if isinstance(context, FoldContext) else context[key]
+def _context_for(context: EngineContext | Mapping[str, EngineContext], key: str) -> EngineContext:
+	return context if isinstance(context, EngineContext) else context[key]

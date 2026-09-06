@@ -1,9 +1,9 @@
 """Cross-key propagation: the walker in core/propagate.py."""
+
 from __future__ import annotations
 
-import unittest
-
 import math
+import unittest
 from datetime import datetime, timedelta
 
 from hypothesis import given
@@ -12,26 +12,26 @@ from hypothesis import strategies as st
 from erpnext.stock.engine import (
 	CostLink,
 	CostLinkedLeg,
+	EngineContext,
 	Event,
 	EventKind,
 	Fifo,
-	FoldContext,
 	Leg,
 	PropagationResult,
 	Voucher,
-	fold_voucher,
-	propagate,
+	apply_voucher,
+	propagate_cost_links,
 	replay,
 )
 
-FIFO = FoldContext(policy=Fifo())
-BASE = datetime(2025, 1, 1)  # noqa: DTZ001 — business posting time is naive by design
+FIFO = EngineContext(policy=Fifo())
+BASE = datetime(2025, 1, 1)
 
 
 @st.composite
 def transfer_graphs(draw, allow_diamond: bool = False):
 	"""Consistent multi-key transfer scenarios with a backdated trigger on K0."""
-	context = FoldContext(policy=Fifo(), fallback_rate=7)
+	context = EngineContext(policy=Fifo(), fallback_rate=7)
 	graph = _Graph(context)
 	_random_ops(draw, graph, "K0", draw(st.integers(1, 4)))
 	diamond = allow_diamond and draw(st.booleans())
@@ -43,27 +43,41 @@ def transfer_graphs(draw, allow_diamond: bool = False):
 		_random_ops(draw, graph, target, draw(st.integers(0, 2)))
 	minute = draw(st.integers(0, graph.minute))
 	inserted = Event(
-		9999, BASE + timedelta(minutes=minute, seconds=30),
-		EventKind.RECEIPT, draw(st.integers(1, 100)), draw(st.integers(1, 50)))
+		9999,
+		BASE + timedelta(minutes=minute, seconds=30),
+		EventKind.RECEIPT,
+		draw(st.integers(1, 100)),
+		draw(st.integers(1, 50)),
+	)
 	graph.emit("K0", inserted)
 	return graph.streams, graph.links, inserted, context
 
 
 def transfer_scenario(
-	target_qty: float = 50, cost_share_qty: float | None = None, extra_cost: float = 0.0,
+	target_qty: float = 50,
+	cost_share_qty: float | None = None,
+	extra_cost: float = 0.0,
 ) -> tuple[dict[str, list[Event]], list[CostLink]]:
 	"""The scratchpad demo posted state: Stores receipts, one transfer into WIP."""
 	stores = [
 		Event(1, day(1, 1), EventKind.RECEIPT, 30, 10),
 		Event(2, day(1, 20), EventKind.RECEIPT, 70, 12),
 	]
-	transfer = Voucher(legs=(
-		Leg("Stores", Event(10, day(2, 1), EventKind.ISSUE, -50)),
-		CostLinkedLeg(
-			key="WIP", id=11, posting_datetime=day(2, 1), qty_change=target_qty,
-			cost_from=10, extra_cost=extra_cost, cost_share_qty=cost_share_qty),
-	))
-	posted = fold_voucher({"Stores": replay(stores, FIFO).final}, transfer, FIFO)
+	transfer = Voucher(
+		legs=(
+			Leg("Stores", Event(10, day(2, 1), EventKind.ISSUE, -50)),
+			CostLinkedLeg(
+				key="WIP",
+				id=11,
+				posting_datetime=day(2, 1),
+				qty_change=target_qty,
+				cost_from=10,
+				extra_cost=extra_cost,
+				cost_share_qty=cost_share_qty,
+			),
+		)
+	)
+	posted = apply_voucher({"Stores": replay(stores, FIFO).final}, transfer, FIFO)
 	inward = realized_inward(posted, "WIP")
 	streams = {"Stores": [*stores, transfer.legs[0].event], "WIP": [inward]}
 	share = cost_share_qty if cost_share_qty is not None else target_qty
@@ -75,7 +89,7 @@ def realized_inward(posted, key: str) -> Event:
 
 
 def day(month: int, day_of_month: int) -> datetime:
-	return datetime(2025, month, day_of_month)  # noqa: DTZ001
+	return datetime(2025, month, day_of_month)
 
 
 def close(a: float, b: float) -> bool:
@@ -94,7 +108,7 @@ def _random_ops(draw, graph: _Graph, key: str, count: int) -> None:
 class _Graph:
 	"""Builds time-ordered multi-key streams whose links start out consistent."""
 
-	def __init__(self, context: FoldContext) -> None:
+	def __init__(self, context: EngineContext) -> None:
 		self.context = context
 		self.streams: dict[str, list[Event]] = {"K0": []}
 		self.links: list[CostLink] = []
@@ -142,12 +156,12 @@ class TestPropagateFunctions(unittest.TestCase):
 		backdated = Event(20, day(1, 15), EventKind.RECEIPT, 40, 8)
 		streams["Stores"].append(backdated)
 
-		result = propagate(streams, links, ("Stores", backdated), FIFO)
+		result = propagate_cost_links(streams, links, ("Stores", backdated), FIFO)
 
-		assert close(result.refolds["Stores"].effects[10].consumed_rate, 9.2)
+		assert close(result.recomputes["Stores"].effects[10].consumed_rate, 9.2)
 		(re_realized,) = result.re_realized_events
 		assert re_realized.id == 11 and close(re_realized.declared_rate, 9.2)
-		wip = result.refolds["WIP"]
+		wip = result.recomputes["WIP"]
 		assert close(wip.effects[11].value_delta - wip_before.effects[11].value_delta, -80)
 		assert close(wip.effects[12].value_delta - wip_before.effects[12].value_delta, 32)
 		assert result.invalidations == (("Stores", 20), ("WIP", 11))
@@ -158,16 +172,20 @@ class TestPropagateFunctions(unittest.TestCase):
 			Event(1, day(1, 1), EventKind.RECEIPT, 30, 10),
 			Event(2, day(1, 20), EventKind.RECEIPT, 70, 12),
 		]
-		first = Voucher(legs=(
-			Leg("A", Event(10, day(2, 1), EventKind.ISSUE, -50)),
-			CostLinkedLeg(key="B", id=11, posting_datetime=day(2, 1), qty_change=50, cost_from=10),
-		))
-		b_in = realized_inward(fold_voucher({"A": replay(a, FIFO).final}, first, FIFO), "B")
-		second = Voucher(legs=(
-			Leg("B", Event(20, day(3, 1), EventKind.ISSUE, -50)),
-			CostLinkedLeg(key="C", id=21, posting_datetime=day(3, 1), qty_change=50, cost_from=20),
-		))
-		c_in = realized_inward(fold_voucher({"B": replay([b_in], FIFO).final}, second, FIFO), "C")
+		first = Voucher(
+			legs=(
+				Leg("A", Event(10, day(2, 1), EventKind.ISSUE, -50)),
+				CostLinkedLeg(key="B", id=11, posting_datetime=day(2, 1), qty_change=50, cost_from=10),
+			)
+		)
+		b_in = realized_inward(apply_voucher({"A": replay(a, FIFO).final}, first, FIFO), "B")
+		second = Voucher(
+			legs=(
+				Leg("B", Event(20, day(3, 1), EventKind.ISSUE, -50)),
+				CostLinkedLeg(key="C", id=21, posting_datetime=day(3, 1), qty_change=50, cost_from=20),
+			)
+		)
+		c_in = realized_inward(apply_voucher({"B": replay([b_in], FIFO).final}, second, FIFO), "C")
 		streams = {
 			"A": [*a, first.legs[0].event],
 			"B": [b_in, second.legs[0].event],
@@ -177,18 +195,18 @@ class TestPropagateFunctions(unittest.TestCase):
 		backdated = Event(30, day(1, 15), EventKind.RECEIPT, 40, 8)
 		streams["A"].append(backdated)
 
-		result = propagate(streams, links, ("A", backdated), FIFO)
+		result = propagate_cost_links(streams, links, ("A", backdated), FIFO)
 
 		assert result.invalidations == (("A", 30), ("B", 11), ("C", 21))
 		assert [event.id for event in result.re_realized_events] == [11, 21]
 		assert close(result.streams["C"][0].declared_rate, 9.2)
-		assert close(result.refolds["C"].final.qty, 40)
-		assert close(result.refolds["C"].final.value, 40 * 9.2)
-		for key in result.refolds:
-			assert result.refolds[key].final == replay(result.streams[key], FIFO).final
+		assert close(result.recomputes["C"].final.qty, 40)
+		assert close(result.recomputes["C"].final.value, 40 * 9.2)
+		for key in result.recomputes:
+			assert result.recomputes[key].final == replay(result.streams[key], FIFO).final
 
 	def test_reconciliation_between_backdate_and_transfer_cuts_propagation(self) -> None:
-		"""Cut 1: the trigger refold converges at the assertion; the link never fires."""
+		"""Cut 1: the trigger recompute converges at the assertion; the link never fires."""
 		a = [
 			Event(1, day(1, 1), EventKind.RECEIPT, 30, 10),
 			Event(2, day(1, 20), EventKind.RECEIPT, 70, 12),
@@ -200,17 +218,17 @@ class TestPropagateFunctions(unittest.TestCase):
 		streams = {"A": [*a, backdated], "B": [b_in]}
 		links = [CostLink(10, "B", 11, 50)]
 
-		result = propagate(streams, links, ("A", backdated), FIFO)
+		result = propagate_cost_links(streams, links, ("A", backdated), FIFO)
 
 		assert result.invalidations == (("A", 30),)
 		assert result.re_realized_events == ()
-		assert "B" not in result.refolds
+		assert "B" not in result.recomputes
 		assert result.streams["B"] == [b_in]
-		assert result.refolds["A"].converged_at == 5
-		assert 10 in result.refolds["A"].skipped
+		assert result.recomputes["A"].converged_at == 5
+		assert 10 in result.recomputes["A"].skipped
 
 	def test_backdate_landing_after_consumed_range_does_not_fire(self) -> None:
-		"""Cut 2: the refold reaches the transfer but its consumed rate is unchanged."""
+		"""Cut 2: the recompute reaches the transfer but its consumed rate is unchanged."""
 		a = [
 			Event(1, day(1, 1), EventKind.RECEIPT, 60, 10),
 			Event(10, day(2, 1), EventKind.ISSUE, -50),
@@ -220,10 +238,10 @@ class TestPropagateFunctions(unittest.TestCase):
 		streams = {"A": [*a, backdated], "B": [b_in]}
 		links = [CostLink(10, "B", 11, 50)]
 
-		result = propagate(streams, links, ("A", backdated), FIFO)
+		result = propagate_cost_links(streams, links, ("A", backdated), FIFO)
 
-		assert 10 in result.refolds["A"].effects
-		assert close(result.refolds["A"].effects[10].consumed_rate, 10)
+		assert 10 in result.recomputes["A"].effects
+		assert close(result.recomputes["A"].effects[10].consumed_rate, 10)
 		assert result.re_realized_events == ()
 		assert result.invalidations == (("A", 30),)
 		assert result.streams["B"] == [b_in]
@@ -235,29 +253,29 @@ class TestPropagateFunctions(unittest.TestCase):
 		backdated = Event(20, day(1, 15), EventKind.RECEIPT, 40, 8)
 		streams["Stores"].append(backdated)
 
-		result = propagate(streams, links, ("Stores", backdated), FIFO)
+		result = propagate_cost_links(streams, links, ("Stores", backdated), FIFO)
 
 		expected_rate = (9.2 * 50 + 100) / 25
 		assert close(result.streams["WIP"][0].declared_rate, expected_rate)
-		assert close(result.refolds["WIP"].final.value, 25 * expected_rate)
+		assert close(result.recomputes["WIP"].final.value, 25 * expected_rate)
 
 	@given(transfer_graphs())
 	def test_cascade_equivalence_after_propagate(self, scenario) -> None:
-		"""Load-bearing: every refolded key equals a from-scratch replay of its stream."""
+		"""Load-bearing: every recomputed key equals a from-scratch replay of its stream."""
 		streams, links, inserted, context = scenario
-		result = propagate(streams, links, ("K0", inserted), context)
+		result = propagate_cost_links(streams, links, ("K0", inserted), context)
 		for key, stream in result.streams.items():
-			refold = result.refolds.get(key)
-			if refold is None:
+			recompute = result.recomputes.get(key)
+			if recompute is None:
 				continue
 			full = replay(stream, context)
-			assert refold.final == full.final
-			for event_id, state in refold.states.items():
+			assert recompute.final == full.final
+			for event_id, state in recompute.states.items():
 				assert full.states[event_id] == state
 
 	@given(transfer_graphs(allow_diamond=True))
 	def test_propagation_terminates_on_random_graphs(self, scenario) -> None:
 		streams, links, inserted, context = scenario
-		result = propagate(streams, links, ("K0", inserted), context)
+		result = propagate_cost_links(streams, links, ("K0", inserted), context)
 		assert isinstance(result, PropagationResult)
 		assert len(result.invalidations) <= 1 + len(links) * (len(links) + 1)

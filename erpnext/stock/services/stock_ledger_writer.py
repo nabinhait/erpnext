@@ -14,14 +14,14 @@ from typing import TYPE_CHECKING
 import frappe
 from frappe.utils import now
 
-from erpnext.stock.services.stock_write_guard import authorized_writer
+from erpnext.stock.services.stock_write_audit import routed_write
 
 if TYPE_CHECKING:
 	from frappe.model.document import Document
 
 
-@authorized_writer
-def submit_new(
+@routed_write
+def insert_and_submit(
 	args: dict, allow_negative_stock: bool = False, via_landed_cost_voucher: bool = False
 ) -> "Document":
 	"""Insert and submit one Stock Ledger Entry — the only insert path."""
@@ -39,20 +39,20 @@ def submit_new(
 		set_fields(sle, {"creation": args.get("creation_time")})
 
 	if frappe.conf.get("stock_event_dual_write"):
-		from erpnext.stock.services import stock_event_emitter
+		from erpnext.stock.services import stock_event_writer
 
-		stock_event_emitter.emit_for_sle(sle)
+		stock_event_writer.insert_for_sle(sle)
 
 	return sle
 
 
-@authorized_writer
-def insert_raw(args: dict) -> "Document":
+@routed_write
+def insert_without_validation(args: dict) -> "Document":
 	"""Insert a draft SLE skipping validations and link checks.
 
 	Exists only for console repair tooling
 	(``stock_balance.set_stock_balance_as_per_serial_no``); everything else
-	must go through :func:`submit_new`.
+	must go through :func:`insert_and_submit`.
 	"""
 	sle = frappe.get_doc(args)
 	sle.flags.ignore_validate = True
@@ -61,7 +61,7 @@ def insert_raw(args: dict) -> "Document":
 	return sle
 
 
-@authorized_writer
+@routed_write
 def set_fields(sle: "Document | str", values: dict, update_modified: bool = True) -> None:
 	"""Update fields on one SLE row; ``sle`` is a Document or a name."""
 	if isinstance(sle, str):
@@ -70,30 +70,30 @@ def set_fields(sle: "Document | str", values: dict, update_modified: bool = True
 		sle.db_set(values, update_modified=update_modified)
 
 
-@authorized_writer
-def write_valuation(sle: dict) -> None:
+@routed_write
+def update_valuation(sle: dict) -> None:
 	"""Write back recomputed valuation fields during a repost.
 
 	Full-row UPDATE via ``db_update`` — deliberately no validation and no hooks,
 	matching how reposting has always written. A legacy rewrite makes any fold
-	checkpoint for the key stale, so it is invalidated here.
+	snapshot for the key stale, so it is invalidated here.
 	"""
 	frappe.get_doc(sle).db_update()
 
-	from erpnext.stock.services import stock_fold_authority
+	from erpnext.stock.services import stock_engine_valuation
 
-	if stock_fold_authority.tracks_state():
-		stock_fold_authority.invalidate(
+	if stock_engine_valuation.is_dual_write_enabled():
+		stock_engine_valuation.delete_engine_state(
 			sle.get("item_code"), sle.get("warehouse"), sle.get("posting_datetime")
 		)
 
 
-@authorized_writer
-def flag_voucher_cancelled(voucher_type: str, voucher_no: str) -> None:
+@routed_write
+def mark_voucher_cancelled(voucher_type: str, voucher_no: str) -> None:
 	"""Mark all live SLEs of a voucher cancelled.
 
 	Rows are flagged, never deleted; the caller inserts reversal rows via
-	:func:`submit_new` so the ledger stays append-only.
+	:func:`insert_and_submit` so the ledger stays append-only.
 	"""
 	sle = frappe.qb.DocType("Stock Ledger Entry")
 	(
@@ -105,7 +105,7 @@ def flag_voucher_cancelled(voucher_type: str, voucher_no: str) -> None:
 	).run()
 
 
-@authorized_writer
+@routed_write
 def set_fields_for_voucher(
 	voucher_type: str, voucher_no: str, values: dict, except_warehouses: list[str] | None = None
 ) -> None:
@@ -119,8 +119,8 @@ def set_fields_for_voucher(
 	query.run()
 
 
-@authorized_writer
-def clear_bundle_links(bundle_names: list[str]) -> None:
+@routed_write
+def unlink_bundles(bundle_names: list[str]) -> None:
 	"""Null the bundle link on cancelled SLEs referencing these bundles (POS merge delink)."""
 	sle = frappe.qb.DocType("Stock Ledger Entry")
 	(
@@ -130,7 +130,7 @@ def clear_bundle_links(bundle_names: list[str]) -> None:
 	).run()
 
 
-@authorized_writer
+@routed_write
 def rename_row(oldname: str, newname: str) -> None:
 	"""Rename a temporarily named SLE row to its final series name (hourly rename job)."""
 	sle = frappe.qb.DocType("Stock Ledger Entry")
@@ -145,32 +145,32 @@ def rename_row(oldname: str, newname: str) -> None:
 	frappe.db.set_value("Stock Event", {"sle": oldname}, "sle", newname, update_modified=False)
 
 
-@authorized_writer
+@routed_write
 def delete_for_voucher(voucher_type: str, voucher_no: str) -> None:
 	"""Hard-delete a voucher's SLE rows.
 
 	Only reached from document deletion with Accounts Settings
 	``delete_linked_ledger_entries`` enabled; cancellation never deletes.
 	"""
-	_invalidate_fold_state({"voucher_type": voucher_type, "voucher_no": voucher_no})
+	_delete_engine_state_for_rows({"voucher_type": voucher_type, "voucher_no": voucher_no})
 	sle = frappe.qb.DocType("Stock Ledger Entry")
 	frappe.qb.from_(sle).delete().where(
 		(sle.voucher_type == voucher_type) & (sle.voucher_no == voucher_no)
 	).run()
 
 
-@authorized_writer
+@routed_write
 def delete_rows(names: list[str]) -> None:
 	"""Hard-delete SLE rows by name (per-company transaction deletion job)."""
-	_invalidate_fold_state({"name": ("in", names)})
+	_delete_engine_state_for_rows({"name": ("in", names)})
 	frappe.db.delete("Stock Ledger Entry", {"name": ("in", names)})
 
 
-def _invalidate_fold_state(filters: dict) -> None:
-	"""Memoised fold state must not outlive the ledger rows it was folded from."""
-	from erpnext.stock.services import stock_fold_authority
+def _delete_engine_state_for_rows(filters: dict) -> None:
+	"""Memoised engine state must not outlive the ledger rows it was folded from."""
+	from erpnext.stock.services import stock_engine_valuation
 
-	if not stock_fold_authority.tracks_state():
+	if not stock_engine_valuation.is_dual_write_enabled():
 		return
 	keys = frappe.get_all(
 		"Stock Ledger Entry",
@@ -179,10 +179,10 @@ def _invalidate_fold_state(filters: dict) -> None:
 		group_by="item_code, warehouse",
 	)
 	for key in keys:
-		stock_fold_authority.invalidate(key.item_code, key.warehouse)
+		stock_engine_valuation.delete_engine_state(key.item_code, key.warehouse)
 
 
-@authorized_writer
+@routed_write
 def shift_future_qty(
 	args: dict, qty_shift: float, next_stock_reco_detail=None, standard_rate: float | None = None
 ) -> None:

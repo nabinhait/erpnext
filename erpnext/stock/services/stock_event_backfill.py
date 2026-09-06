@@ -16,24 +16,24 @@ idempotent, and resumable: rerunning skips SLEs that already have an event
 import frappe
 from frappe.utils import cint, flt
 
-from erpnext.stock.services import stock_event_emitter
+from erpnext.stock.services import stock_event_writer
 
 BATCH_SIZE = 5000
 
 
-def run(warehouses: list[str] | None = None, batch_size: int = BATCH_SIZE) -> dict:
+def backfill_events(warehouses: list[str] | None = None, batch_size: int = BATCH_SIZE) -> dict:
 	summary = {"created": 0, "skipped": 0}
 
-	for warehouse in warehouses or _all_warehouses():
+	for warehouse in warehouses or _get_leaf_warehouses():
 		cursor = None
 		warehouse_created = 0
 		while True:
-			rows = _next_batch(warehouse, cursor, batch_size)
+			rows = _get_next_sle_batch(warehouse, cursor, batch_size)
 			if not rows:
 				break
 
 			cursor = (rows[-1].posting_datetime, rows[-1].creation, rows[-1].name)
-			existing = _existing_event_sles([row.name for row in rows])
+			existing = _get_sles_with_events([row.name for row in rows])
 			pending = [row for row in rows if row.name not in existing]
 
 			summary["skipped"] += len(rows) - len(pending)
@@ -57,10 +57,10 @@ def _insert_events(rows: list[frappe._dict]) -> int:
 	if not rows:
 		return 0
 
-	bundle_entries = _bundle_entries([row.serial_and_batch_bundle for row in rows])
+	bundle_entries = _get_bundle_entries([row.serial_and_batch_bundle for row in rows])
 	buffer = []
 	for row in rows:
-		args = stock_event_emitter.event_args_from_sle(
+		args = stock_event_writer.get_event_args_from_sle(
 			row,
 			allocations=bundle_entries.get(row.serial_and_batch_bundle)
 			if row.serial_and_batch_bundle
@@ -72,7 +72,7 @@ def _insert_events(rows: list[frappe._dict]) -> int:
 	return _flush(buffer)
 
 
-def _bundle_entries(bundles: list[str | None]) -> dict[str, list[dict]]:
+def _get_bundle_entries(bundles: list[str | None]) -> dict[str, list[dict]]:
 	names = [bundle for bundle in bundles if bundle]
 	if not names:
 		return {}
@@ -164,7 +164,7 @@ def _flush(buffer: list[dict]) -> int:
 	frappe.db.bulk_insert("Stock Event", BULK_FIELDS, values)
 	if allocation_values:
 		frappe.db.bulk_insert(
-			"Stock Event Allocation", stock_event_emitter.ALLOCATION_FIELDS, allocation_values
+			"Stock Event Allocation", stock_event_writer.ALLOCATION_FIELDS, allocation_values
 		)
 
 	inserted = len(buffer)
@@ -172,7 +172,7 @@ def _flush(buffer: list[dict]) -> int:
 	return inserted
 
 
-def verify(
+def verify_backfill(
 	warehouses: list[str] | None = None,
 	batch_size: int = BATCH_SIZE,
 	shard: int | None = None,
@@ -187,7 +187,7 @@ def verify(
 	"""
 	report = {"checked": 0, "missing": [], "order_mismatches": [], "hash_mismatches": []}
 
-	targets = warehouses or _all_warehouses()
+	targets = warehouses or _get_leaf_warehouses()
 	if shards:
 		targets = targets[shard::shards]
 
@@ -197,12 +197,12 @@ def verify(
 		expected = {}
 		cursor = None
 		while True:
-			rows = _next_batch(warehouse, cursor, batch_size)
+			rows = _get_next_sle_batch(warehouse, cursor, batch_size)
 			if not rows:
 				break
 
 			cursor = (rows[-1].posting_datetime, rows[-1].creation, rows[-1].name)
-			events = _events_by_sle([row.name for row in rows])
+			events = _get_events_by_sle([row.name for row in rows])
 
 			for row in rows:
 				report["checked"] += 1
@@ -211,7 +211,7 @@ def verify(
 					report["missing"].append(row.name)
 					continue
 
-				if event.content_hash != stock_event_emitter.event_args_from_sle(row)["content_hash"]:
+				if event.content_hash != stock_event_writer.get_event_args_from_sle(row)["content_hash"]:
 					report["hash_mismatches"].append(row.name)
 
 				expected.setdefault(row.item_code, []).append(cint(event.name))
@@ -224,11 +224,11 @@ def verify(
 	return report
 
 
-def _all_warehouses() -> list[str]:
+def _get_leaf_warehouses() -> list[str]:
 	return frappe.get_all("Warehouse", filters={"is_group": 0}, order_by="name", pluck="name")
 
 
-def _next_batch(warehouse: str, cursor: tuple | None, batch_size: int) -> list[frappe._dict]:
+def _get_next_sle_batch(warehouse: str, cursor: tuple | None, batch_size: int) -> list[frappe._dict]:
 	sle = frappe.qb.DocType("Stock Ledger Entry")
 	query = (
 		frappe.qb.from_(sle)
@@ -251,11 +251,11 @@ def _next_batch(warehouse: str, cursor: tuple | None, batch_size: int) -> list[f
 	return query.run(as_dict=True)
 
 
-def _existing_event_sles(sle_names: list[str]) -> set[str]:
+def _get_sles_with_events(sle_names: list[str]) -> set[str]:
 	return set(frappe.get_all("Stock Event", filters={"sle": ("in", sle_names)}, pluck="sle"))
 
 
-def _events_by_sle(sle_names: list[str]) -> dict[str, frappe._dict]:
+def _get_events_by_sle(sle_names: list[str]) -> dict[str, frappe._dict]:
 	events = frappe.get_all(
 		"Stock Event",
 		filters={"sle": ("in", sle_names)},
@@ -264,7 +264,7 @@ def _events_by_sle(sle_names: list[str]) -> dict[str, frappe._dict]:
 	return {event.sle: event for event in events}
 
 
-def verify_fast(hash_sample_size: int = 20000) -> dict:
+def verify_backfill_by_sampling(hash_sample_size: int = 20000) -> dict:
 	"""The verify gate at production scale: set-based SQL for the missing and
 	order checks, a random sample for hash determinism.
 
@@ -313,7 +313,7 @@ def verify_fast(hash_sample_size: int = 20000) -> dict:
 	hash_mismatches = sum(
 		1
 		for row in sample
-		if row._event_hash != stock_event_emitter.event_args_from_sle(row, allocations=[])["content_hash"]
+		if row._event_hash != stock_event_writer.get_event_args_from_sle(row, allocations=[])["content_hash"]
 	)
 
 	return {

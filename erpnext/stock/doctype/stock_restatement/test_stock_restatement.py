@@ -27,7 +27,7 @@ class TestStockRestatement(ERPNextTestSuite):
 	def test_reopening_the_frontier_restates_the_year(self):
 		"""Cancelling the frontier closing queues a restatement that locks the
 		period, slides the frontier one closing back (new closing + opening
-		adjustment), refolds every key to engine truth with the corrections
+		adjustment), recomputes every key to engine truth with the corrections
 		booked on the restatement, and unlocks when done."""
 		company = make_company(COMPANY, ABBREVIATION)
 		warehouse = make_warehouse("Restatement WH", company)
@@ -120,6 +120,6 @@ class TestStockRestatement(ERPNextTestSuite):
 		adjustment = frappe.get_doc(
 			doctype="Stock Opening Adjustment", company=company, stock_closing_entry=closing.name
 		).insert()
-		adjustment.build()
+		adjustment.compute_differences()
 		adjustment.submit()
 		return closing, adjustment

@@ -2,25 +2,26 @@
 
 No Frappe, no database, no I/O — enforced by tests/test_purity.py.
 """
-from .context import FoldContext
+
+from .apply import apply_event
+from .context import EngineContext
 from .event import Event, EventKind
-from .fold import fold
 from .lots import Allocation, LotType
 from .policies import Fifo, Lifo, MovingAverage, StandardCost, ValuationPolicy
-from .propagate import CostLink, PropagationResult, propagate
-from .replay import ReplayResult, refold_after_insert, replay, sort_events
-from .state import Effect, Layer, LotState, State
-from .voucher import CostLinkedLeg, Leg, Voucher, VoucherResult, fold_voucher
+from .propagate import CostLink, PropagationResult, propagate_cost_links
+from .replay import ReplayResult, replay, replay_after_insert, sort_events
+from .state import EventEffect, Layer, LotState, State
+from .voucher import CostLinkedLeg, Leg, Voucher, VoucherResult, apply_voucher
 
 __all__ = [
 	"Allocation",
 	"CostLink",
 	"CostLinkedLeg",
-	"Effect",
+	"EngineContext",
 	"Event",
+	"EventEffect",
 	"EventKind",
 	"Fifo",
-	"FoldContext",
 	"Layer",
 	"Leg",
 	"Lifo",
@@ -34,10 +35,10 @@ __all__ = [
 	"ValuationPolicy",
 	"Voucher",
 	"VoucherResult",
-	"fold",
-	"fold_voucher",
-	"propagate",
-	"refold_after_insert",
+	"apply_event",
+	"apply_voucher",
+	"propagate_cost_links",
 	"replay",
+	"replay_after_insert",
 	"sort_events",
 ]

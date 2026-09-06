@@ -10,7 +10,7 @@ from erpnext.stock.doctype.stock_reconciliation.test_stock_reconciliation import
 	create_stock_reconciliation,
 )
 from erpnext.stock.doctype.warehouse.test_warehouse import create_warehouse
-from erpnext.stock.services import stock_event_backfill, stock_event_emitter, stock_shadow
+from erpnext.stock.services import stock_engine_parity_check, stock_event_backfill, stock_event_writer
 from erpnext.tests.utils import ERPNextTestSuite
 
 WAREHOUSE = "_Test Warehouse - _TC"
@@ -39,7 +39,7 @@ class TestStockEvent(ERPNextTestSuite):
 
 			sle_row = frappe.db.get_value("Stock Ledger Entry", event.sle, "*", as_dict=1)
 			self.assertEqual(
-				event.content_hash, stock_event_emitter.event_args_from_sle(sle_row)["content_hash"]
+				event.content_hash, stock_event_writer.get_event_args_from_sle(sle_row)["content_hash"]
 			)
 
 			stock_entry.cancel()
@@ -69,10 +69,10 @@ class TestStockEvent(ERPNextTestSuite):
 		create_stock_reconciliation(item_code=item, warehouse=warehouse, qty=15, rate=105)
 
 		live_rows = frappe.db.count("Stock Ledger Entry", {"warehouse": warehouse, "is_cancelled": 0})
-		summary = stock_event_backfill.run(warehouses=[warehouse])
+		summary = stock_event_backfill.backfill_events(warehouses=[warehouse])
 		self.assertEqual(summary["created"], live_rows)
 
-		report = stock_event_backfill.verify(warehouses=[warehouse])
+		report = stock_event_backfill.verify_backfill(warehouses=[warehouse])
 		self.assertTrue(report["ok"], msg=str(report))
 		self.assertEqual(report["checked"], live_rows)
 
@@ -85,11 +85,11 @@ class TestStockEvent(ERPNextTestSuite):
 		self.assertTrue(assertion)
 		self.assertEqual(assertion.assert_qty, 15)
 
-		rerun = stock_event_backfill.run(warehouses=[warehouse])
+		rerun = stock_event_backfill.backfill_events(warehouses=[warehouse])
 		self.assertEqual(rerun["created"], 0)
 		self.assertEqual(rerun["skipped"], live_rows)
 
-		shadow = stock_shadow.run(warehouses=[warehouse])
+		shadow = stock_engine_parity_check.compare_with_legacy(warehouses=[warehouse])
 		self.assertTrue(shadow["ok"], msg=str(shadow))
 		self.assertEqual(shadow["matched"], live_rows)
 		self.assertFalse(shadow["class_a_keys"])

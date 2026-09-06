@@ -8,7 +8,7 @@ from frappe.query_builder import Case, Order
 from frappe.query_builder.functions import Coalesce, Sum
 from frappe.utils import flt
 
-from erpnext.stock.services import bin_writer, stock_write_guard
+from erpnext.stock.services import bin_writer, stock_write_audit
 
 
 class Bin(Document):
@@ -39,15 +39,15 @@ class Bin(Document):
 	# end: auto-generated types
 
 	def db_insert(self, *args, **kwargs):
-		stock_write_guard.check("Bin")
+		stock_write_audit.log_if_unrouted("Bin")
 		super().db_insert(*args, **kwargs)
 
 	def db_update(self, *args, **kwargs):
-		stock_write_guard.check("Bin")
+		stock_write_audit.log_if_unrouted("Bin")
 		super().db_update(*args, **kwargs)
 
 	def db_set(self, *args, **kwargs):
-		stock_write_guard.check("Bin")
+		stock_write_audit.log_if_unrouted("Bin")
 		return super().db_set(*args, **kwargs)
 
 	@frappe.whitelist()

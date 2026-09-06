@@ -1,0 +1,423 @@
+# Copyright (c) 2026, Frappe Technologies Pvt. Ltd. and Contributors
+# License: GNU General Public License v3. See license.txt
+
+"""Refolding a key: rewrite the projections of every row a change in history
+touches, from one core shared by three callers.
+
+- ``recompute_after_event`` — synchronous, anchored on the inserted or revaluing
+  event (backdates and landed cost). Past ``SYNC_RECOMPUTE_CAP`` events since the
+  opening_assertion it values the new row from the nearest snapshot, shifts future
+  quantities as legacy does, and queues the rest as a Stock Recompute Request.
+- ``recompute_from`` — background, from an instant, no cap: the Stock Recompute Request
+  queue and the Stock Restatement job.
+
+The window a recompute rewrites starts at the last assertion at or before the
+anchor (an assertion reconstructs the exact state) and stops after the first
+assertion beyond it. GL corrections are append-only rows carried on the
+triggering voucher, dated at each affected voucher's own posting date inside
+the open period.
+"""
+
+import frappe
+from frappe.utils import cint, flt
+
+from erpnext.stock.services import stock_engine_adapter
+
+SYNC_RECOMPUTE_CAP = 20000
+
+
+def recompute_after_event(
+	engine, policy, event_row: frappe._dict, args: dict, allow_negative_stock: bool
+) -> str | None:
+	"""Backdated insert or revaluation. Returns RECOMPUTED (done in place),
+	QUEUED (own row valued, rest queued) or None (legacy engine)."""
+	from erpnext.stock.services import stock_engine_valuation as valuation
+
+	key = {"item_code": event_row.item_code, "warehouse": event_row.warehouse}
+	if not valuation.has_complete_event_history(key, allow_lots=True):
+		return None
+	if not valuation.can_recompute_synchronously(key):
+		return _value_row_now_and_queue_history(engine, policy, event_row, args, allow_negative_stock)
+
+	opening_assertion = valuation.get_latest_opening_assertion_datetime(key)
+	if opening_assertion and str(event_row.posting_datetime) < str(opening_assertion):
+		return None  # backdates into the frozen era stay legacy
+
+	anchor = (str(event_row.posting_datetime), cint(event_row.name))
+	rows = get_events_after_opening_assertion(key, opening_assertion)
+	return _recompute_window(
+		engine,
+		policy,
+		key,
+		rows,
+		anchor,
+		args,
+		validate_event_id=cint(event_row.name),
+		allow_negative_stock=allow_negative_stock,
+	)
+
+
+def recompute_from(item_code: str, warehouse: str, from_datetime: str, args: dict) -> bool:
+	"""Recompute everything at or after the instant, however deep. False when the
+	key cannot fold at all (its legacy values stay)."""
+	from erpnext.stock.services import stock_engine_valuation as valuation
+
+	engine = stock_engine_adapter.get_engine()
+	policy = stock_engine_adapter.get_valuation_policy(item_code, engine)
+	key = {"item_code": item_code, "warehouse": warehouse}
+	if policy is None or not valuation.has_complete_event_history(key, allow_lots=True):
+		return False
+
+	opening_assertion = valuation.get_latest_opening_assertion_datetime(key)
+	start = max(str(from_datetime), str(opening_assertion)) if opening_assertion else str(from_datetime)
+	rows = get_events_after_opening_assertion(key, opening_assertion)
+	return _recompute_window(engine, policy, key, rows, (start, 0), args) is not None
+
+
+def _value_row_now_and_queue_history(
+	engine, policy, event_row, args: dict, allow_negative_stock: bool
+) -> str | None:
+	"""Legacy's own shape for a deep backdate: the inserted row is valued
+	synchronously (from the nearest snapshot), quantities shift now, values
+	of later rows follow in the background."""
+	from erpnext.stock.doctype.stock_recompute_request.stock_recompute_request import enqueue_recompute
+	from erpnext.stock.services import stock_engine_snapshots
+	from erpnext.stock.services import stock_engine_valuation as valuation
+
+	if not event_row.sle:
+		return None  # only a ledger row can be valued on its own
+	state = stock_engine_snapshots.get_state_before_event(engine, event_row)
+	allocations = None
+	if args.get("serial_and_batch_bundle"):
+		allocations = stock_engine_adapter.get_allocations_by_event([event_row.name]).get(str(event_row.name))
+	try:
+		event = stock_engine_adapter.make_engine_event(engine, event_row, allocations)
+	except ValueError:
+		return None
+
+	result = engine.replay([event], engine.EngineContext(policy=policy), start=state)
+	effect = result.effects[event.id]
+	valuation._validate_negative_stock(effect, args, allow_negative_stock)
+	valuation._write_valuation_to_sle(
+		event_row.sle, result.final, effect.qty_after, effect.value_after, effect.value_delta, policy, engine
+	)
+	# the stored state predates this row; until the queue recomputes the key,
+	# later submits must not append onto it
+	valuation.delete_engine_state(event_row.item_code, event_row.warehouse, event_row.posting_datetime)
+	enqueue_recompute(
+		event_row.item_code,
+		event_row.warehouse,
+		args.get("company"),
+		event_row.posting_datetime,
+		args.get("voucher_type"),
+		args.get("voucher_no"),
+	)
+	return valuation.QUEUED
+
+
+def get_events_after_opening_assertion(key: dict, opening_assertion: str | None) -> list[frappe._dict]:
+	from erpnext.stock.services import stock_engine_valuation as valuation
+
+	filters = dict(key)
+	if opening_assertion:
+		filters["posting_datetime"] = (">=", str(opening_assertion))
+	return valuation.exclude_revoked_opening_assertions(
+		frappe.get_all(
+			"Stock Event",
+			filters=filters,
+			fields=stock_engine_adapter.EVENT_FIELDS,
+			order_by="posting_datetime, name",
+		)
+	)
+
+
+def _recompute_window(
+	engine,
+	policy,
+	key: dict,
+	rows: list,
+	anchor: tuple,
+	args: dict,
+	validate_event_id: int | None = None,
+	allow_negative_stock: bool = False,
+) -> str | None:
+	"""Fold the window around the anchor and rewrite what changed; the
+	synchronous event path names the event whose effect is checked for
+	negative stock."""
+	from erpnext.stock.services import stock_engine_valuation as valuation
+
+	window = _get_affected_window(rows, anchor)
+	if window is None:
+		return valuation.RECOMPUTED  # nothing at or after the anchor
+	is_tail = window[1] == len(rows)
+	rows = rows[window[0] : window[1]]
+	# a boundary assertion reconstructs the state but its own stored values are
+	# untouched by the change — never re-project it, unless it is the row being inserted
+	inserted_boundary = window[0] > 0 and cint(rows[0].name) == validate_event_id
+	changed_rows = rows if window[0] == 0 or inserted_boundary else rows[1:]
+
+	try:
+		events = stock_engine_adapter.make_engine_events(engine, rows)
+	except ValueError:
+		return None
+
+	result = engine.replay(events, engine.EngineContext(policy=policy))
+	if validate_event_id:
+		valuation._validate_negative_stock(result.effects[validate_event_id], args, allow_negative_stock)
+
+	live = _get_live_sles(key, changed_rows)
+	if inserted_boundary:
+		start_value = _get_stock_value_before(key, anchor[0])
+	elif window[0] > 0:
+		start_value = result.states[cint(rows[0].name)].value
+	else:
+		start_value = 0.0
+	projections = _merge_revaluations_into_sle_values(changed_rows, result, start_value)
+	for sle_name, projection in projections.items():
+		if sle_name in live:
+			valuation._write_valuation_to_sle(
+				sle_name,
+				projection["state"],
+				projection["qty_after"],
+				projection["value"],
+				projection["value_delta"],
+				policy,
+				engine,
+			)
+
+	if is_tail:
+		# the window reaches the present, so latest state and snapshot move
+		last_id = max(cint(row.name) for row in rows)
+		valuation._update_bin_from_state(key["item_code"], key["warehouse"], result.final)
+		valuation._save_engine_state(engine, key["item_code"], key["warehouse"], last_id, result.final)
+
+	# history changed at this instant: snapshots photographed at or after it
+	# are stale and must never seed a read; they rebuild at the next closing
+	# or scheduled run
+	frappe.db.delete("Stock Engine Snapshot", {**key, "as_of": (">=", anchor[0])})
+	_correct_gl_entries(args, key, anchor[0], projections, live)
+	return valuation.RECOMPUTED
+
+
+def _correct_gl_entries(args: dict, key: dict, instant: str, projections: dict, live: dict) -> None:
+	from erpnext.stock.services import stock_engine_valuation as valuation
+
+	if frappe.conf.get(valuation.GL_ADJUSTMENT_FLAG) or args.get("force_gl_adjustment"):
+		if not args.get("skip_gl_adjustment"):
+			_make_gl_adjustment_entries(args, key, projections, live)
+	elif frappe.conf.get(valuation.SUPPRESS_FLAG):
+		_repost_gl_for_changed_vouchers(args, instant, live.values())
+
+
+def _get_stock_value_before(key: dict, instant: str) -> float:
+	"""Legacy's stock value just before the instant — what an inserted
+	reconciliation's own value difference is measured from."""
+	value = frappe.db.get_value(
+		"Stock Ledger Entry",
+		{**key, "is_cancelled": 0, "posting_datetime": ("<", instant)},
+		"stock_value",
+		order_by="posting_datetime desc, creation desc",
+	)
+	return flt(value)
+
+
+def _get_live_sles(key: dict, changed_rows: list) -> dict:
+	names = [row.sle for row in changed_rows if row.sle]
+	if not names:
+		return {}
+	return {
+		sle.name: sle
+		for sle in frappe.get_all(
+			"Stock Ledger Entry",
+			filters={**key, "is_cancelled": 0, "name": ("in", names)},
+			fields=["name", "voucher_type", "voucher_no", "posting_date", "stock_value_difference"],
+		)
+	}
+
+
+def _get_affected_window(rows: list, anchor: tuple) -> tuple[int, int] | None:
+	"""The slice of history a change at the anchor can actually reach, or
+	None when no row lies at or after it.
+
+	An assertion pins quantity and value, so the recompute starts at the last
+	assertion at or before the anchor (folded from empty, it reconstructs
+	the exact state) and stops after the first assertion beyond it. A
+	reversal or revaluation referencing an event before the window forces a
+	full recompute — its source layer lives outside the slice."""
+	keys = [(str(row.posting_datetime), cint(row.name)) for row in rows]
+	inserted = next((index for index, sort_key in enumerate(keys) if sort_key >= anchor), None)
+	if inserted is None:
+		return None
+
+	start = 0
+	for index in range(inserted, -1, -1):
+		if rows[index].kind == "Assertion":
+			start = index
+			break
+
+	end = len(rows)
+	for index in range(inserted + 1, len(rows)):
+		if rows[index].kind == "Assertion":
+			end = index + 1
+			break
+
+	window_start_id = cint(rows[start].name)
+	for row in rows[start:end]:
+		if (
+			row.kind in ("Reversal", "Revaluation")
+			and row.reverses_event
+			and cint(row.reverses_event) < window_start_id
+		):
+			return (0, len(rows))
+
+	return (start, end)
+
+
+def _get_open_period_date(posting_date, closed_until, fallback) -> str:
+	"""Adjustments never post into a closed accounting period: dates at or
+	before the latest Period Closing Voucher clamp to the revising voucher's
+	own date (which passed close validation at submit)."""
+	if closed_until and str(posting_date) <= str(closed_until):
+		return str(fallback)
+	return str(posting_date)
+
+
+def _get_last_period_closing_date(company: str):
+	return frappe.db.get_value(
+		"Period Closing Voucher",
+		{"docstatus": 1, "company": company},
+		"period_end_date",
+		order_by="period_end_date desc",
+	)
+
+
+def _merge_revaluations_into_sle_values(rows: list, result, start_value: float) -> dict:
+	"""Per-SLE projection values with SLE-less events (revaluations) absorbed
+	into the preceding SLE row — the shape legacy books carry landed cost in."""
+	projections: dict[str, dict] = {}
+	prev_value = start_value
+	index, total = 0, len(rows)
+
+	while index < total and not rows[index].sle:
+		prev_value = result.states[cint(rows[index].name)].value
+		index += 1
+
+	while index < total:
+		row = rows[index]
+		tail = index
+		while tail + 1 < total and not rows[tail + 1].sle:
+			tail += 1
+		state = result.states[cint(rows[tail].name)]
+		value = state.value
+		projections[row.sle] = {
+			"qty_after": result.effects[cint(row.name)].qty_after,
+			"value": value,
+			"value_delta": value - prev_value,
+			"state": state,
+		}
+		prev_value = value
+		index = tail + 1
+
+	return projections
+
+
+def _make_gl_adjustment_entries(args: dict, key: dict, projections: dict, live: dict) -> None:
+	"""Append-only GL: never rewrite affected vouchers' postings.
+
+	The net value-delta changes the recompute caused are posted as fresh GL rows on the
+	triggering voucher, netted per counter account and dated on the affected
+	voucher's own posting date — every correction takes effect exactly when
+	the movement it corrects took effect, so stock value and stock account
+	balance agree on every as-of date. Closings guarantee those dates lie in
+	the open period. Historical vouchers keep the GL rows they were reported
+	with; the correction is its own auditable posting."""
+	from erpnext.accounts.general_ledger import make_gl_entries
+	from erpnext.stock import get_warehouse_account_map
+
+	account_map = get_warehouse_account_map(args.get("company"))
+	warehouse_account = (account_map.get(key["warehouse"]) or {}).get("account")
+	if not warehouse_account:
+		return  # no perpetual stock GL on this warehouse: nothing to correct
+
+	excluded = args.get("exclude_voucher") or (args.get("voucher_type"), args.get("voucher_no"))
+	closed_until = _get_last_period_closing_date(args.get("company"))
+	fallback_date = args.get("posting_date") or frappe.utils.nowdate()
+	deltas: dict[tuple[str, str], float] = {}
+	for sle_name, projection in projections.items():
+		stored = live.get(sle_name)
+		if stored is None or (stored.voucher_type, stored.voucher_no) == tuple(excluded):
+			continue
+
+		delta = flt(projection["value_delta"]) - flt(stored.stock_value_difference)
+		if abs(delta) < 0.005:
+			continue
+
+		counter = _get_against_account(stored.voucher_type, stored.voucher_no, warehouse_account)
+		if counter:
+			key = (counter, _get_open_period_date(stored.posting_date, closed_until, fallback_date))
+			deltas[key] = deltas.get(key, 0.0) + delta
+
+	gl_map = []
+	for (counter, posting_date), delta in sorted(deltas.items()):
+		gl_map.extend(make_adjustment_gl_pair(args, warehouse_account, counter, delta, posting_date))
+
+	if gl_map:
+		make_gl_entries(gl_map)
+
+
+def _get_against_account(voucher_type: str, voucher_no: str, warehouse_account: str) -> str | None:
+	against = frappe.db.get_value(
+		"GL Entry",
+		{
+			"voucher_type": voucher_type,
+			"voucher_no": voucher_no,
+			"account": warehouse_account,
+			"is_cancelled": 0,
+		},
+		"against",
+	)
+	return against.split(",")[0].strip() if against else None
+
+
+def make_adjustment_gl_pair(args: dict, account: str, against: str, delta: float, posting_date: str) -> list:
+	"""The two GL rows moving ``delta`` into ``account`` from ``against``."""
+	return [
+		make_adjustment_gl_row(args, account, against, delta, posting_date),
+		make_adjustment_gl_row(args, against, account, -delta, posting_date),
+	]
+
+
+def make_adjustment_gl_row(
+	args: dict, account: str, against: str, debit: float, posting_date: str
+) -> frappe._dict:
+	"""One GL row of a stock value adjustment carried on the voucher in args."""
+	return frappe._dict(
+		{
+			"account": account,
+			"against": against,
+			"debit": debit if debit > 0 else 0,
+			"credit": -debit if debit < 0 else 0,
+			"debit_in_account_currency": debit if debit > 0 else 0,
+			"credit_in_account_currency": -debit if debit < 0 else 0,
+			"voucher_type": args.get("voucher_type"),
+			"voucher_no": args.get("voucher_no"),
+			"company": args.get("company"),
+			"posting_date": posting_date,
+			"cost_center": frappe.get_cached_value("Company", args.get("company"), "cost_center"),
+			"remarks": args.get("adjustment_remark") or "Stock value adjustment for backdated entry",
+			"is_opening": "No",
+		}
+	)
+
+
+def _repost_gl_for_changed_vouchers(args: dict, instant: str, live_sles) -> None:
+	"""With the legacy repost suppressed, correct affected vouchers' GL inline.
+
+	Comparison-based regeneration: only vouchers whose GL no longer matches
+	their (recomputed) value delta get rewritten. The voucher being submitted is
+	excluded — its GL posts normally later in the same submit."""
+	from erpnext.accounts.utils import repost_gle_for_stock_vouchers
+
+	current = (args.get("voucher_type"), args.get("voucher_no"))
+	vouchers = sorted({(sle.voucher_type, sle.voucher_no) for sle in live_sles} - {current})
+	repost_gle_for_stock_vouchers(vouchers, str(instant)[:10], company=args.get("company"))

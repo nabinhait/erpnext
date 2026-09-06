@@ -6,15 +6,15 @@ the checklist — nothing here may be deleted until its precondition holds.
 
 ## Preconditions (all of them, per company)
 
-1. Fold authority covers every flow — the per-event fallbacks in
-   `stock_fold_authority.try_fold` (lot-tracked rows, Standard Cost,
+1. Engine valuation covers every flow — the per-event fallbacks in
+   `stock_engine_valuation.value_stock_ledger_entry` (lot-tracked rows, Standard Cost,
    reconciliations, landed cost, backdated inserts) have been replaced by
    fold-native handling, and the fallback counter is zero over the
    observation window.
-2. Shadow diff (`stock_shadow.run`) has reported zero class (a)/(b)
+2. Shadow diff (`stock_engine_parity_check.compare_with_legacy`) has reported zero class (a)/(b)
    mismatches for the agreed window on every cut-over company, and GL
    reconciliation passes.
-3. The Phase 4 lot restatement (`stock_lot_restatement_preview.run` reviewed and
+3. The Phase 4 lot restatement (`stock_lot_restatement_preview.preview_lot_restatement` reviewed and
    applied) is complete — serial/batch valuation runs on allocations, not on
    `deprecated_serial_batch.py`.
 4. The bypass log (`log_unrouted_stock_writes`) has stayed quiet long enough
@@ -24,7 +24,7 @@ the checklist — nothing here may be deleted until its precondition holds.
 
 - `update_entries_after` and the repost machinery in `stock_ledger.py`
   (`repost_future_sle`, `repost_stock_ledger_entry`, `repost_stock_ledgers`,
-  `get_reposting_data` and the gz checkpoint files)
+  `get_reposting_data` and the gz snapshot files)
 - Repost Item Valuation doctype, its cron entries (`run_parallel_reposting`,
   `repost_entries`), and `spec/reposting.md`
 - `deprecated_serial_batch.py`
@@ -41,7 +41,7 @@ the checklist — nothing here may be deleted until its precondition holds.
 
 - `stock_ledger_writer` / `bin_writer` — the chokepoints become the
   projection writers
-- Stock Closing Entry — now the checkpoint/convergence barrier. Before the
+- Stock Closing Entry — now the snapshot/convergence barrier. Before the
   report migration below, Stock Closing Balance must persist fold-resumable
   state (per-key layers and lot detail, not just totals).
 - The fuzzing tool and shadow diff — permanent CI gates, not scaffolding
@@ -49,7 +49,7 @@ the checklist — nothing here may be deleted until its precondition holds.
 ## The v17 breaking changes (decided 2026-08)
 
 1. **All stock reports read Stock Events + Stock Closing Balance** — nearest
-   checkpoint plus a folded tail. Running balances are computed on read;
+   snapshot plus a folded tail. Running balances are computed on read;
    Stock Ageing takes layers from the fold instead of parsing stock_queue.
    No report queries tabStock Ledger Entry.
 2. **The SLE table is removed, not kept as a projection.** The dual table is

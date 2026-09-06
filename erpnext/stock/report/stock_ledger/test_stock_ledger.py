@@ -42,7 +42,7 @@ class TestStockLedgerReport(ERPNextTestSuite):
 		return execute(filters)[1]
 
 	def sle_rows(self, item_code, warehouse=WH, **extra):
-		# scope to the clean warehouse so the committed baseline stock of reused master
+		# scope to the clean warehouse so the committed opening_assertion stock of reused master
 		# items (in `_Test Warehouse - _TC`) does not leak in; drop the synthetic
 		# "'Opening'" row and keep only this item's ledger lines
 		rows = self.run_report(item_code, warehouse=warehouse, **extra)

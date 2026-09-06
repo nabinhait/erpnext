@@ -461,7 +461,7 @@ class LandedCostVoucher(Document):
 	def _apply_landed_cost_via_fold(self, doc) -> bool:
 		"""Apply this voucher's charges as Revaluation facts instead of the
 		cancel/recreate dance: the receipt's layers are uplifted at their own
-		instant, downstream consumption trues up in the refold, and the charge
+		instant, downstream consumption trues up in the recompute, and the charge
 		posts as append-only GL on this voucher. All-or-nothing per receipt;
 		a cancellation follows whichever path the submission took."""
 		cancelling = self.docstatus == 2
@@ -524,11 +524,11 @@ class LandedCostVoucher(Document):
 	def _receipt_source_event(self, doc, item, cancelling: bool) -> int | None:
 		"""The Stock Event of the receipt row's inward ledger entry, when the
 		key can be revalued (or already was, on cancel)."""
-		from erpnext.stock.services import stock_fold_authority
+		from erpnext.stock.services import stock_engine_valuation
 
 		if not item or not item.warehouse:
 			return None
-		if not cancelling and not stock_fold_authority.can_revalue(
+		if not cancelling and not stock_engine_valuation.can_apply_cost_revision(
 			item.item_code, item.warehouse, doc.company
 		):
 			return None
@@ -554,9 +554,9 @@ class LandedCostVoucher(Document):
 		return source_event
 
 	def _revalue_via_fold(self, item, source_event: int, delta: float, cancelling: bool) -> None:
-		from erpnext.stock.services import stock_fold_authority
+		from erpnext.stock.services import stock_engine_valuation
 
-		outcome = stock_fold_authority.revalue(
+		outcome = stock_engine_valuation.apply_cost_revision(
 			item.item_code,
 			item.warehouse,
 			source_event,
@@ -575,13 +575,13 @@ class LandedCostVoucher(Document):
 	def _post_revaluation_gl(self, doc, item, delta: float, splits: list[tuple[str, float]]) -> None:
 		"""Book the charge on this voucher, split across the expense accounts
 		in the proportion of the charge lines; rounding lands on the last."""
-		from erpnext.stock.services import stock_fold_authority
+		from erpnext.stock.services import stock_engine_valuation
 
 		remaining = delta
 		for index, (account, fraction) in enumerate(splits):
 			portion = remaining if index == len(splits) - 1 else flt(delta * fraction, 2)
 			remaining = flt(remaining - portion, 6)
-			stock_fold_authority.post_revaluation_gl(
+			stock_engine_valuation.make_cost_revision_gl_entries(
 				doc.company,
 				item.warehouse,
 				portion,

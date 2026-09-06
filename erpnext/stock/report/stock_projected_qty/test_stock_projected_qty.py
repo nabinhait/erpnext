@@ -8,7 +8,7 @@ from erpnext.stock.doctype.stock_entry.stock_entry_utils import make_stock_entry
 from erpnext.stock.report.stock_projected_qty.stock_projected_qty import execute
 from erpnext.tests.utils import ERPNextTestSuite
 
-# Use a clean warehouse (zero baseline) so projected-qty assertions are exact.
+# Use a clean warehouse (zero opening_assertion) so projected-qty assertions are exact.
 WAREHOUSE = "Stores - _TC"
 
 

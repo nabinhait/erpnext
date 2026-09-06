@@ -15,7 +15,7 @@ class TestTotalStockSummary(ERPNextTestSuite):
 
 	def test_warehouse_wise_quantity(self):
 		item = "_Test Item"
-		warehouse = "Stores - _TC"  # clean zero baseline for _Test Item
+		warehouse = "Stores - _TC"  # clean zero opening_assertion for _Test Item
 		make_stock_entry(item_code=item, to_warehouse=warehouse, qty=10, rate=100)
 
 		# rows are (warehouse, item_code, description, actual_qty)
@@ -24,7 +24,7 @@ class TestTotalStockSummary(ERPNextTestSuite):
 
 	def test_only_non_zero_bins_are_listed(self):
 		item = "_Test Item 2"
-		warehouse = "Stores - _TC"  # clean zero baseline for _Test Item 2
+		warehouse = "Stores - _TC"  # clean zero opening_assertion for _Test Item 2
 		# receive then issue everything -> bin actual_qty back to zero
 		make_stock_entry(item_code=item, to_warehouse=warehouse, qty=5, rate=100)
 		make_stock_entry(item_code=item, from_warehouse=warehouse, qty=5)

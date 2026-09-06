@@ -11,7 +11,7 @@
   purity gate = source-scan test). Standalone repo archived at `~/bench-cli/stock_engine-archive`
   (harnesses benchmark/ + sle_replay/ live only there).
 - **Sites**: test-runner-site migrated + full battery green (engine 63, authority 13, fold-read 5,
-  event 2, closing 7, opening adjustment 2, refold 1, restatement 1). **test2 and apnaklub are on pre-rebase schema — `bench migrate` needed
+  event 2, closing 7, opening adjustment 2, recompute 1, restatement 1). **test2 and apnaklub are on pre-rebase schema — `bench migrate` needed
   before next use** (apnaklub deliberately: last migration surfaced 5 patch bugs; those are now
   upstream, but a month of new patches + frappe jump is untested there).
 - **Flags on test2**: dual_write, fold_authoritative, suppress_legacy_repost, gl_adjustment.
@@ -30,21 +30,21 @@ rejected; every v17 build item is built against the Stock Event table until he s
 (deferred — see above),
 frozen frontier + opening adjustment, reopen-restates-the-year; batches = flag decides sub-fold vs
 quantity tag, pools never borrow, flag fixed at birth (set_only_once upstream); serials = never in
-fold state, `use_serialwise_valuation` picks pool rate vs per-serial rate buckets; negative stock =
-freeze past as exposure via baseline assertions (freeze_baseline, guard conditional on closing
-entry docstatus); dimensions = event attributes, qty as sums; checkpoints scheduled/silent,
+engine state, `use_serialwise_valuation` picks pool rate vs per-serial rate buckets; negative stock =
+freeze past as exposure via opening assertion assertions (create_opening_assertions, guard conditional on closing
+entry docstatus); dimensions = event attributes, qty as sums; snapshots scheduled/silent,
 closings manual locks.
 
 **Next steps (priority order):**
 1. **Production verification runs (Nabin)** — dual-write + shadow on real sites; shadow's
    negative_exposure bucket must be re-read after the d3363f56 fix (it was inflated).
-2. **v17 migration patch** — one resumable full fold, FY-boundary checkpoints, frontier closing
-   entry, Opening Adjustment (auto-submit within threshold, else stop), current-FY refold. The
+2. **v17 migration patch** — one resumable full fold, FY-boundary snapshots, frontier closing
+   entry, Opening Adjustment (auto-submit within threshold, else stop), current-FY recompute. The
    SLE-absorbs-Stock-Event schema step is deferred until the production runs are done.
 3. **apnaklub**: Opening Adjustment compute dry run over 90k keys (first scale test of
-   opening_delta + the attached breakdown; child table holds differing keys only), then a
-   reopen (closing cancel → Stock Restatement) to size a year's refold.
-4. Refold queue hardening: per-key advisory lock in refold_key on postgres (sync appends and the
+   get_opening_differences + the attached breakdown; child table holds differing keys only), then a
+   reopen (closing cancel → Stock Restatement) to size a year's recompute.
+4. Recompute queue hardening: per-key advisory lock in recompute_from on postgres (sync appends and the
    job can interleave; MariaDB gap locks cover it today), a Desk list view / retry button for
    Failed rows.
 5. Review follow-ups (see 2026-09-06 review entry): one-off repair of stale `Stock Event.sle`
@@ -56,8 +56,8 @@ closings manual locks.
 8. Gameplan post — blocked on user running `frappectl auth login` in a real terminal.
 9. Open numbers for Nabin/Ankush: opening-delta approval threshold; v17 beta cohort.
 
-Known small debts: probe no-commit guards, report JSON filters for Desk, closing-entry checkpoint
-summary line, remaining fold fallbacks (Standard Cost, SE/SCR LCVs, post-baseline reco-bearing
+Known small debts: probe no-commit guards, report JSON filters for Desk, closing-entry snapshot
+summary line, remaining fold fallbacks (Standard Cost, SE/SCR LCVs, post-opening assertion reco-bearing
 batch keys), pre-fix −80 GL pair on test2's MAT-PRE-2026-00002, scoped TLA+.
 
 ---
@@ -270,10 +270,10 @@ guarantees *every write has one address*.
 
 - `insert(rows)` — #1 (doc-API submit stays inside, unchanged)
 - `set_fields(sle_name, values)` — #2, #3, #9–#12 (single-row db_set family)
-- `write_valuation(sle_dict)` — #4 (the repost writeback)
+- `update_valuation(sle_dict)` — #4 (the repost writeback)
 - `bulk_update(filters, values)` — #5, #6, #7, #13, #8
 - `delete(filters)` — #14, #15
-- `insert_raw(row)` — #16, kept deliberately ugly and named for what it is
+- `insert_without_validation(row)` — #16, kept deliberately ugly and named for what it is
 - #17 stays a caller (it composes cancel+submit, both already routed)
 
 **`bin_writer.py`** (absorbs the 9 Bin sites):
@@ -318,7 +318,7 @@ Stock Settings toggle (`auto_create_stock_closing_entry`, default off) plus a
 monthly scheduled job that creates+submits one per company for the previous
 month, skipping companies where one already overlaps (the doctype's
 `validate_duplicate` already enforces overlap exclusion). Under the new
-engine these become the checkpoint/convergence barriers, so turning them on
+engine these become the snapshot/convergence barriers, so turning them on
 early caps future backdate cost on real sites.
 
 ---
@@ -337,13 +337,13 @@ enough to review:
 2. **SLE writer module** — introduce `stock_ledger_writer.py`; route the six
    in-pipeline sites (#1–#6). No semantic change, pure call-site refactor.
    **Status: done** — PR #57981 (stacked on #57980), branch
-   `refactor/sle-writer-module`. Primitives: `submit_new`, `set_fields`,
-   `write_valuation`, `shift_future_qty`, `flag_voucher_cancelled`.
+   `refactor/sle-writer-module`. Primitives: `insert_and_submit`, `set_fields`,
+   `update_valuation`, `shift_future_qty`, `mark_voucher_cancelled`.
 3. **SLE side channels** — route #7–#17 (serial/batch db_sets, PR
    recalculate flag, POS delink, rename cron, deletes, repair insert).
    **Status: done** — PR #57982 (stacked on #57981), branch
-   `refactor/sle-writer-side-channels`. Added primitives: `insert_raw`,
-   `set_fields_for_voucher`, `clear_bundle_links`, `rename_row`,
+   `refactor/sle-writer-side-channels`. Added primitives: `insert_without_validation`,
+   `set_fields_for_voucher`, `unlink_bundles`, `rename_row`,
    `delete_for_voucher`, `delete_rows`. Sweep confirms zero unrouted SLE
    writes outside patches/tests.
 4. **Bin writer module** — introduce `bin_writer.py`; route all 9 sites;
@@ -352,7 +352,7 @@ enough to review:
 5. **Bypass logger** — context token + logging wrapper behind
    `log_unrouted_stock_writes`; optional trigger DDL behind a second flag.
    **Status: done (in-process layer)** — commit b63cef0c5;
-   `stock_write_guard.py`, `authorized_writer` decorator on all primitives,
+   `stock_write_audit.py`, `routed_write` decorator on all primitives,
    `db_insert`/`db_update`/`db_set` overrides on both doctypes. DB-trigger
    layer deliberately not implemented (optional, revisit if real-site logs
    suggest raw-SQL writers).
@@ -383,14 +383,14 @@ Implemented in commits 7f7fc8cb1 + 474b9f93a:
   `(posting_datetime, name)`; kind Receipt/Issue/Assertion/Reversal; declared
   facts only; unique `sle` provenance link; `content_hash` over fact fields)
   and child `Stock Event Allocation` (serial/batch ± rows). Rows writable only
-  via `stock_event_emitter` — the doctype throws on any other write.
-- **Dual-write:** `stock_ledger_writer.submit_new` emits the fact in the same
+  via `stock_event_writer` — the doctype throws on any other write.
+- **Dual-write:** `stock_ledger_writer.insert_and_submit` emits the fact in the same
   transaction, behind site config `stock_event_dual_write` (default off — do
   not enable before the M2 bypass-log gate closes). Cancels → Reversal events
   referencing the original; recos → Assertions. Voucher deletion and company
   wipes remove events alongside SLEs (`emitter.delete_for_voucher`, TDR
   `LEDGER_ENTRY_DOCTYPES`).
-- **Backfill:** `stock_event_backfill.run()` — per warehouse, legacy order
+- **Backfill:** `stock_event_backfill.backfill_events()` — per warehouse, legacy order
   `(posting_datetime, creation, name)`, keyset-paginated, idempotent
   (rerun skips via unique sle link). `verify()` checks the Phase 1 gate:
   no missing events, per-item id order reproduces legacy order, hashes
@@ -409,7 +409,7 @@ check; backfill order/hash gate + idempotence) — green.
 
 ## Part 6 — M4 (Phase 2, shadow mode) on the same branch
 
-Commit 3f7737ec5: `stock/services/stock_shadow.py` — folds each
+Commit 3f7737ec5: `stock/services/stock_engine_parity_check.py` — folds each
 (item, warehouse) key's events through the `stock_engine` pure core
 (FIFO/LIFO/Moving Average) and diffs every event's qty_after/value_after
 against the linked SLE's stored `qty_after_transaction`/`stock_value`, with
@@ -427,7 +427,7 @@ the inward rate during repost — that is the cost-link drift the M4
 classification exists to measure, not a tool bug.
 
 **Rung 2 — concurrent fuzzing (commit de36bf819):**
-`stock/services/stock_fuzz.py` — seeded worker threads, own DB connections,
+`stock/services/stock_engine_fuzz.py` — seeded worker threads, own DB connections,
 overlapping receipts/issues/transfers/backdates on a hot-key pool; deadlock
 retry mimicking the web layer; queued reposts processed; invariants checked
 (running qty, Σsvd vs stock_value, Bin parity, dual-write event parity).
@@ -437,7 +437,7 @@ First measurements on test-runner-site (4 workers × 15 ops, dual-write on):
 the lock-contention argument in §2.7/R3.
 
 **M4 remaining (needs real data / calendar):** run backfill + shadow on a
-production restore; classify diffs; wire `stock_shadow.run` into a scheduled
+production restore; classify diffs; wire `stock_engine_parity_check.compare_with_legacy` into a scheduled
 job with a persisted result log once the first manual runs are understood;
 fuzz as a CI gate; scoped TLA+ model per §2.14 rung 4.
 
@@ -448,13 +448,13 @@ fuzz as a CI gate; scoped TLA+ model per §2.14 rung 4.
 So the M4 branch stays frozen for the real-site test, cutover work lives on
 `stock-ledger-cutover` (3 commits on top):
 
-- **M5 core (dad621eee)** — `stock_fold_authority.py` + `Stock Fold State`
-  doctype + `stock_engine_bridge.py`. With `stock_fold_authoritative` on
+- **M5 core (dad621eee)** — `stock_engine_valuation.py` + `Stock Engine State`
+  doctype + `stock_engine_adapter.py`. With `stock_engine_valuation` on
   (requires dual-write), the submit hot path folds the new event onto the
   key's persisted state and projects the Effect into legacy SLE fields +
   Bin (GL and reports unchanged). Per-event legacy fallback: lots, Standard
   Cost, recos, LCV, backdates, incomplete event history. Legacy rewrites
-  invalidate the checkpoint via the `write_valuation` chokepoint; next fold
+  invalidate the snapshot via the `update_valuation` chokepoint; next fold
   rebuilds from events. Parity test green: identical FIFO scenario under
   both engines → matching SLE fields, queues, Bins.
 - **M6 instruments (0c58f396a)** — shadow folds lot allocations
@@ -466,24 +466,24 @@ So the M4 branch stays frozen for the real-site test, cutover work lives on
   preconditions. Actual deletions land only after full cutover.
 
 **M5 continued (82f5ca7e7):** fold-native backdates — a backdated insert
-synchronously refolds the whole key (cap 20k events, complete aggregate-only
+synchronously recomputes the whole key (cap 20k events, complete aggregate-only
 history required) and rewrites changed projections in the same transaction;
 the legacy RIV still runs afterwards for GL and re-confirms identical
 values (coexistence by design until decommission). Reconciliations fold as
 assertion events; adjustment entries stay legacy.
-`stock_fold_authoritative_companies` scopes authority per company. Parity
+`stock_engine_valuation_companies` scopes authority per company. Parity
 test: reco + mid-history backdate scenario matches legacy — with the fold
 side never processing a repost (legacy side needed one).
 
 **M5/M6 build completed (75f8116b8 + a0fc255e5 + dc66bd483):**
-- Repost suppression (`stock_fold_suppress_legacy_repost`): fold-covered
-  vouchers create no RIV; refolds regenerate affected GL inline.
-- Append-only GL (`stock_fold_gl_adjustment`): refolds never rewrite posted
+- Repost suppression (`stock_engine_suppress_legacy_repost`): fold-covered
+  vouchers create no RIV; recomputes regenerate affected GL inline.
+- Append-only GL (`stock_engine_gl_adjustment`): recomputes never rewrite posted
   GL — net svd deltas post as remarked GL rows on the backdated voucher,
   netted per counter account; account balances proven equal to the legacy
   rewrite.
-- Bounded refolds: only the window between the surrounding assertions is
-  folded; reversal-across-boundary forces full refold.
+- Bounded recomputes: only the window between the surrounding assertions is
+  folded; reversal-across-boundary forces full recompute.
 - Lot-tracked submits: allocations fold as lot sub-states at per-lot moving
   average (= legacy batch-wise/per-serial semantics); parity test green.
   Lot keys with assertions, and lot backdates, stay legacy.
@@ -492,7 +492,7 @@ side never processing a repost (legacy side needed one).
 **Still open (deliberately):** the M6 restatement *apply* (gated on
 previewing real data); §2.11 perf gate on the real-data restore; scoped
 TLA+ of the fold-state locking protocol; v17 track (closing-balance
-checkpoint fidelity, report migration, SLE removal per spec).
+snapshot fidelity, report migration, SLE removal per spec).
 
 Site test2 currently runs the full new system: dual_write + authoritative +
 suppress_legacy_repost (switch to gl_adjustment to try append-only GL).
@@ -507,7 +507,7 @@ warehouses, 307 assets.
 
 - **M2 gate: PASSED.** `log_unrouted_stock_writes` on through migration,
   backfill, and both gate runs — **0 unrouted writes**.
-- **M3 gate: PASSED** (`verify_fast`, seconds): 0 missing events, 0 order
+- **M3 gate: PASSED** (`verify_backfill_by_sampling`, seconds): 0 missing events, 0 order
   violations across all keys (window-function proof that per-key event ids
   ascend in the legacy total order), 0/20,000 sampled hash mismatches.
 - **M4 shadow (6 parallel shards over 90,694 keys):**
@@ -526,7 +526,7 @@ warehouses, 307 assets.
 
 | round | change | exact match | within noise |
 |---|---|---|---|
-| 1 | baseline | 96.53% | 97.13% |
+| 1 | opening assertion | 96.53% | 97.13% |
 | 2 | per-lot MA for all lot items | **72.3% (regression)** | — |
 | 3 | lots folded only for bundle rows; rate-targeted cost-linked legs | 96.59% | 97.18% |
 | 4 | per-key adaptive semantics classification | 97.29% | 97.86% |
@@ -561,16 +561,16 @@ the M4 gate or fold the residue into the cutover opening adjustment.
 
 **§2.11 perf gate, measured on apnaklub (a32a2ea8a, rolled-back probe):**
 
-| metric | fold authority | legacy |
+| metric | engine valuation | legacy |
 |---|---|---|
 | warm submit, 124–214-event keys | 259–262 ms (flat vs depth) | 190–211 ms |
-| cold submit (checkpoint rebuild) | 1.5 s once per key | n/a |
+| cold submit (snapshot rebuild) | 1.5 s once per key | n/a |
 | backdated entry → books correct | **900 ms, synchronous** (SLE+Bin+GL inline) | 247 ms submit + **12.9 s** repost ≈ 13.2 s |
 
 Verdict: sync-backdate target (<1 s) **met with GL correction included** —
 14.6× faster to correct books than legacy's queue. Plain-submit overhead was
 ~1.25× legacy; after the hot-path optimization (9ed7e5a04: sequence-reserved
-direct event insert, event handed to authority via request-locals, checkpoint
+direct event insert, event handed to authority via request-locals, snapshot
 row handle reused from the locked read) the second probe run measured:
 backdate **900 → 395 ms** (legacy time-to-correct 7.2–12.9 s across runs),
 cold rebuild 1.5 s → 584 ms, warm submits within legacy's own run-to-run
@@ -586,14 +586,14 @@ config).
 
 ## Part 9 — v17 build track (started 2026-09-03)
 
-1. **Checkpoint fidelity + fold-read service — done** (aac57e7b).
-   `Stock Fold Checkpoint` persists fold-resumable state per active key when
+1. **Snapshot fidelity + fold-read service — done** (aac57e7b).
+   `Stock Engine Snapshot` persists fold-resumable state per active key when
    a Stock Closing Entry is processed (sparse keys skipped — reads fall back
-   to older checkpoints); cancellation removes them. `stock_fold_read` is
-   the v17 read model: `state_as_of` = nearest checkpoint + folded tail,
-   `ledger_rows` for running per-event views. Property test green.
-   **Real-data proof (apnaklub, 200 sampled keys):** checkpoints created and
-   resume-from-checkpoint == fold-from-zero **200/200**; quantities match
+   to older snapshots); cancellation removes them. `stock_engine_snapshots` is
+   the v17 read model: `get_state_as_of` = nearest snapshot + folded tail,
+   `get_ledger_rows` for running per-event views. Property test green.
+   **Real-data proof (apnaklub, 200 sampled keys):** snapshots created and
+   resume-from-snapshot == fold-from-zero **200/200**; quantities match
    Bin **200/200**; values match **197/200** (the 3 misses are the known
    classified residue keys). Whole exercise: 8.6 s.
 2. **Stock Balance port + parity harness — done** (5014f197 + arbitration).
@@ -607,8 +607,8 @@ config).
    fold shows every key with balances (21,715) — a semantics difference,
    arguably a fold improvement. Value arbitration + the 1 fold-wrong key:
    next loop. Probe hygiene: two "rolled-back" exercises leaked commits
-   (RIV repost and checkpoint flusher commit internally) — future probes
-   get a no-commit guard; leaked checkpoints cleaned 2026-09-03.
+   (RIV repost and snapshot flusher commit internally) — future probes
+   get a no-commit guard; leaked snapshots cleaned 2026-09-03.
 3. **Stock Ledger + Stock Ageing ports — done** (a206b04f), parity on the
    residue-hotspot warehouse (SHR-SHR-P29-OTPL):
    - Ledger: **qty 1308/1308**; value 1040/1308 — the mismatch dump exposed
@@ -620,7 +620,7 @@ config).
      layers by source-event date.
    All three fold reports carry parity tests; harness handles legacy's
    positional ageing rows.
-4. **Remaining on track:** closing-entry checkpoint summary line (UX);
+4. **Remaining on track:** closing-entry snapshot summary line (UX);
    value-level arbitration in the balance harness; the 1 fold-wrong balance
    key; long-tail reports (Projected Qty, Analytics) as needed.
 
@@ -635,10 +635,10 @@ a legacy fallback (in-place rewrite via cancel/recreate + RIV).
 
 Now: each receipt item's charge becomes a **Revaluation event** at the
 receipt's own instant referencing the receipt's event; the fold uplifts the
-surviving layers per-unit and the refold trues up downstream consumption.
+surviving layers per-unit and the recompute trues up downstream consumption.
 GL is append-only end to end: the charge posts on the LCV against its
 taxes' expense accounts dated at the receipt; downstream corrections ride
-the standard per-voucher-dated adjustment machinery. Refold projections
+the standard per-voucher-dated adjustment machinery. Recompute projections
 became absorption-based (SLE-less events fold into the preceding SLE row —
 the shape legacy books carry landed cost in). All-or-nothing per receipt,
 legacy fallback for lot-tracked keys / incomplete history; cancel emits the
@@ -648,7 +648,7 @@ green.
 
 **Extended to lot keys (8cf355f6):** bundle-backed batch and serial keys
 now take the fold path for backdates and revaluations — allocations fold as
-lot sub-states in the refold; parity test covers PR + issue + LCV for both
+lot sub-states in the recompute; parity test covers PR + issue + LCV for both
 a batch and a serial item (zero RIVs, difference entries, identical books).
 Found via manual testing on test2 (a batch item's LCV fell back to legacy
 by design; stale web workers and unprocessed RIVs compounded the
@@ -662,8 +662,8 @@ engine fbedb52). `use_batchwise_valuation` survives and decides fold
 participation: flag-on batch = sub-fold, flag-off batch = quantity tag
 priced at the shared pool's rate; flag fixed at the batch's birth.
 Engine folds partially allocated events (remainder → top-level pool);
-bridge `to_event` filters allocations by the flag at the single
-chokepoint (authority/checkpoints/reads), shadow + restatement preview
+bridge `make_engine_event` filters allocations by the flag at the single
+chokepoint (authority/snapshots/reads), shadow + restatement preview
 opt out to replay history's own shape. Mixed keys deliberately diverge
 from legacy's whole-position blend: pools never borrow, so stock-out
 closes at exactly zero instead of leaving residual value at zero qty.
@@ -674,64 +674,64 @@ for qty, warehouse stays the valuation boundary.
 
 2026-09-04 (later) — Negative-stock decision implemented: freeze the past
 as-is, clean forward (erpnext 62218d2f, engine 6435368). New
-`stock_fold_cutover.freeze_baseline(company)`: one SLE-less baseline
+`stock_engine_opening.create_opening_assertions(company)`: one SLE-less opening assertion
 Assertion per key pins legacy's stored closing balance (negative →
 frozen exposure settled at true cost; lots seeded via per-lot
 declared_rate on Stock Event Allocation; quantity-tag batches in the
-pool). Authority/read paths are baseline-aware (completeness + lot-reco
-gates since latest baseline only; refolds never fetch behind it;
+pool). Authority/read paths are opening assertion-aware (completeness + lot-reco
+gates since latest opening assertion only; recomputes never fetch behind it;
 frozen-era backdates fall back to legacy). This is also the missing M5
-brownfield-start mechanism: a site can flip fold authority without
+brownfield-start mechanism: a site can flip engine valuation without
 backfill by freezing first. Batch flag guard: turned out already
 enforced upstream — use_batchwise_valuation is set_only_once; pinned in
-test instead of duplicating (994ecc28). Run `freeze_baseline` +
+test instead of duplicating (994ecc28). Run `create_opening_assertions` +
 `frappe.reload_doc` for stock_event/stock_event_allocation on test2
 after pulling (new declared_rate column).
 
 2026-09-04 (evening) — v17 cutover model settled in a brainstorm and
 recorded in the redesign doc (Part 4, "The v17 cutover: frozen
 frontier"): no per-site shadow; SLE absorbs Stock Event and stays the
-one facts table; migration folds history once, checkpoints every FY
+one facts table; migration folds history once, snapshots every FY
 boundary, submits a frontier Stock Closing Entry and posts an opening
-adjustment document at current-FY start (threshold-gated), then refolds
+adjustment document at current-FY start (threshold-gated), then recomputes
 the current FY. Frontier invariant: one live adjustment at the
 frozen/engine boundary; reopening a year (cancelling its closing)
 restates it to engine truth and slides the adjustment back one year,
 newest-first. Amendments behind the lock become reversal-facts-today.
-Checkpoints decoupled from closings (3279c4a8): monthly scheduler cuts
-bare checkpoints (create_monthly_fold_checkpoints, idempotent, no
+Snapshots decoupled from closings (3279c4a8): monthly scheduler cuts
+bare snapshots (create_monthly_snapshots, idempotent, no
 setting); closings are manual locks; the auto-closing job and its
 Stock Settings checkbox are removed. Pending build alignment: make the
-baseline guard conditional on the closing entry's docstatus; write
+opening assertion guard conditional on the closing entry's docstatus; write
 migration patch (SLE merge + opening adjustment doc); ship write-guard
 logger to v16.
 
-2026-09-04 (night) — Baseline guard made conditional on the closing
-entry's docstatus (78e6ee97). freeze_baseline gained closing_entry=...:
-owned baselines link via voucher fields and lock only while the closing
-is submitted; _latest_baseline resolves the newest *active* baseline
-(frontier slides back on cancel); _drop_revoked_baselines filters
-revoked pins out of refold/rebuild/read replays. Unowned baselines stay
+2026-09-04 (night) — Opening assertion guard made conditional on the closing
+entry's docstatus (78e6ee97). create_opening_assertions gained closing_entry=...:
+owned opening assertions link via voucher fields and lock only while the closing
+is submitted; get_latest_opening_assertion_datetime resolves the newest *active* opening assertion
+(frontier slides back on cancel); exclude_revoked_opening_assertions filters
+revoked pins out of recompute/rebuild/read replays. Unowned opening assertions stay
 unconditional. 11/11 authority + 3/3 fold-read tests green.
 
-2026-09-04 (late) — Stale-checkpoint bug found while writing the fold
-state/checkpoint explainer and fixed (da370489): refolds never
-invalidated Stock Fold Checkpoint rows dated after the insertion, so
-state_as_of resumed from a pre-backdate photograph and never folded the
+2026-09-04 (late) — Stale-snapshot bug found while writing the fold
+state/snapshot explainer and fixed (da370489): recomputes never
+invalidated Stock Engine Snapshot rows dated after the insertion, so
+get_state_as_of resumed from a pre-backdate photograph and never folded the
 backdated fact (wrong reads forever). _refold now deletes the key's
-checkpoints with as_of >= the inserted instant; write_valuation's
+snapshots with as_of >= the inserted instant; update_valuation's
 invalidate() does the same scoped deletion for legacy rewrites (all
-checkpoints when the instant is unknown). Regression test confirmed
+snapshots when the instant is unknown). Regression test confirmed
 red-without/green-with the fix.
 
 2026-09-04 (test2 backdate flow) — Full backdated-entry flow verified
 live on test2 (all four flags on): receipt 10@50, issue 2, closing
-CBAL-00002 cut a checkpoint, then a receipt backdated before everything
-(10@60). Results: sync refold repriced the issue -100 → -120 (FIFO
-consumes the older 60-layer first); stale checkpoint deleted (the
+CBAL-00002 cut a snapshot, then a receipt backdated before everything
+(10@60). Results: sync recompute repriced the issue -100 → -120 (FIFO
+consumes the older 60-layer first); stale snapshot deleted (the
 da370489 fix working live); 0 RIVs; append-only GL — original issue GL
 untouched, -20 correction pair posted on the backdated voucher dated at
-the issue's own date; fold state, state_as_of, and Bin all at 18/980.
+the issue's own date; engine state, get_state_as_of, and Bin all at 18/980.
 Bonus catch: the tightened allocation validation tripped on test2's old
 cancelled-receipt events — the emitter stored bundle-direction signs on
 Reversal events (+1 on a -1 event; folding would move the lot the wrong
@@ -743,7 +743,7 @@ left committed (warehouse "Backdate Flow 18023 - TC").
 (§2.6 scale note): blob-per-key state is O(participating lots); fix
 ladder = serial participation flag (open item, mirrors batch decision;
 covers mass-serialized goods), guardrail warning at 5k lots in
-_save_state + checkpoint creation (implemented, commit above), per-lot
+_save_engine_state + snapshot creation (implemented, commit above), per-lot
 state rows as the designed escape hatch (build only when real data
 triggers the guardrail).
 
@@ -754,25 +754,25 @@ picked from the ₹55 carton cost ₹55). Quantity-tag mode stays for
 batches only (legacy's own flag). Scale answer promoted from escape
 hatch to committed plan: storage tiering — blob tier (≤ ~5k lots, as
 built) / row tier (Stock Fold Lot State, one row per lot, point-reads
-of touched lots only, copy-on-write checkpoints); the 5k guardrail is
+of touched lots only, copy-on-write snapshots); the 5k guardrail is
 the row-tier migration trigger. §2.6 scale note revised accordingly.
 Row tier is a v17 build item, not yet implemented.
 
 2026-09-04 (serials, final) — Serial model settled on third iteration
 (participation flag and Stock Fold Lot State row tier both rejected):
-serials NEVER live in fold state — always quantity tags in the fold,
+serials NEVER live in engine state — always quantity tags in the fold,
 facts carry position/traceability. New Item flag
 `use_serialwise_valuation` (mirrors use_batchwise_valuation, fixed
 after first serialized movement, default on for v15 continuity) picks
-the issue's rate source: off = pool rate from Stock Fold State; on =
+the issue's rate source: off = pool rate from Stock Engine State; on =
 per-serial rate derived at write time from the last inward allocation's
 declared_rate (+ revaluation uplifts on the source receipt), consumed
-via rate buckets through _take_at_rate. Scale problem structurally
-gone; guardrail now effectively watches batches only; freeze_baseline
+via rate buckets through _consume_at_rate. Scale problem structurally
+gone; guardrail now effectively watches batches only; create_opening_assertions
 seeds pools + batchwise batches only. §2.6 rewritten. Build items: the
 Item flag, emitter rate-bucket derivation for serialwise issues, drop
-serial allocations from fold events in to_event, simplify
-freeze_baseline serial seeding.
+serial allocations from fold events in make_engine_event, simplify
+create_opening_assertions serial seeding.
 
 2026-09-04 (serialwise implemented) — use_serialwise_valuation shipped
 (erpnext 086a4ba3, engine 36a1760). Engine: Event.rate_buckets — (qty,
@@ -780,10 +780,10 @@ rate) groups consumed from matching layers before declared_rate/policy
 (outward only, validated). ERPNext: Item flag (default 1, v15
 continuity; enable blocked once Serial Nos exist per Nabin's rule);
 emitter stores SABE incoming_rate as allocation declared_rate (per-
-serial audit trail); to_event drops serials from lot allocations
-always and buckets flagged items' outward picks; policy_for folds
+serial audit trail); make_engine_event drops serials from lot allocations
+always and buckets flagged items' outward picks; get_valuation_policy folds
 serialwise items layered (Fifo) regardless of valuation method
-(shadow passes honor_serialwise=False); freeze_baseline seeds batches
+(shadow passes honor_serialwise=False); create_opening_assertions seeds batches
 only; item_code added to replay fetch field lists. Tests: engine 77,
 authority 12 (new: -140 serialwise vs -116 MA pool on identical picks,
 empty lots both, enable-guard), fold-read 4. NOTE for test2/apnaklub:
@@ -858,7 +858,7 @@ was STOPPED by Nabin: "don't merge the stock event table into SLE now, I
 will still run this into some real production sites to verify the
 results." Reverted before any commit. Design worked out that session,
 kept for later: fact columns on SLE (event_id from a standalone sequence,
-kind incl. Baseline, declared_rate, assert_qty/rate, reverses_event,
+kind incl. Opening assertion, declared_rate, assert_qty/rate, reverses_event,
 value_change), allocations as a child table of SLE with rename-cron
 cascade, cancelled originals + reversal rows both facts (kind Reversal
 paired by voucher/detail/-qty), in-place stamping patch with Python-side
@@ -867,11 +867,11 @@ into the preceding receipt row as today).
 
 2026-09-05 (evening, fix) — Exposure double-subtraction (d3363f56): the
 engine's State.value already nets -exposure_qty*exposure_rate, yet
-_equivalent_value (authority refold projections), shadow's
-_legacy_equivalent_value, ledger_rows and the Stock Balance (fold) report
+_equivalent_value (authority recompute projections), shadow's
+_legacy_equivalent_value, get_ledger_rows and the Stock Balance (fold) report
 subtracted it again — a key at -3 @ 80 read -480. Verified with a bare
-engine replay. One helper now (stock_engine_bridge.equivalent_value =
-identity), all callers through it, regression test in test_stock_fold_read.
+engine replay. One helper now (stock_engine_adapter.equivalent_value =
+identity), all callers through it, regression test in test_stock_engine_snapshots.
 Consequence for the production runs: shadow's negative_exposure counts
 on apnaklub were inflated; rerun before citing them.
 
@@ -881,42 +881,42 @@ be submitted), moment = closing to_date 23:59:59.999999, posting_date =
 to_date + 1, adjustment_account (default Company.stock_adjustment_account),
 keys/skipped_keys (Standard Cost), total_delta, threshold (new Stock
 Settings.opening_adjustment_threshold), within_threshold, items table
-(differing keys only). compute() enqueues build(): opening_delta folds
-every key via state_as_of, full per-key result attached as gz JSON.
-Submit: emit_baselines at engine values owned by the adjustment (batch
+(differing keys only). compute() enqueues build(): get_opening_differences folds
+every key via get_state_as_of, full per-key result attached as gz JSON.
+Submit: insert_opening_assertions at engine values owned by the adjustment (batch
 seeds from fold lots; dropped when negative/overshoot), GL Dr/Cr stock
 account vs adjustment account netted per account on posting_date, Bins
 shifted by the deltas. Cancel: only via the closing entry's cancel
 (before_cancel guard; closing.on_cancel cascades with
-flags.via_closing_cancel), reverse GL, un-shift bins, drop fold state.
-_baseline_active now checks any owner's docstatus. stock_fold_cutover
-split: emit_baselines (shared) + freeze_baseline (legacy pins) +
-opening_delta (engine truth). Tests on a dedicated company: drift of 37
-booked exactly, baseline 6 @ 100, fold continues from it (issue 1 →
+flags.via_closing_cancel), reverse GL, un-shift bins, drop engine state.
+_is_opening_assertion_active now checks any owner's docstatus. stock_engine_opening
+split: insert_opening_assertions (shared) + create_opening_assertions (legacy pins) +
+get_opening_differences (engine truth). Tests on a dedicated company: drift of 37
+booked exactly, opening assertion 6 @ 100, fold continues from it (issue 1 →
 svd -100), threshold gating (0/5/10 vs |−8|), closing cancel cascades.
 Open: 90k-key scale of build() (single request in the long queue, one
 attachment), and whether the child table should cap rows.
 
-2026-09-06 — Queued refolds + Stock Restatement (eea2cc91c1). Refold core moved
-out of stock_fold_authority into stock_fold_refold (authority 873 → ~600
-lines): refold_for_event (sync, anchored) and refold_key (background,
-from an instant, no cap) share _refold_rows/_refold_window, anchored on a
+2026-09-06 — Queued recomputes + Stock Restatement (eea2cc91c1). Recompute core moved
+out of stock_engine_valuation into stock_engine_recompute (authority 873 → ~600
+lines): recompute_after_event (sync, anchored) and recompute_from (background,
+from an instant, no cap) share _recompute_window/_get_affected_window, anchored on a
 (posting_datetime, id) sort key instead of an inserted event.
 foldable_reason(key) → None | "cap" | "incomplete" | "lots".
-  Overflow queue: past REFOLD_CAP the backdate is valued from the
-nearest checkpoint (stock_fold_read.state_before = checkpoint + tail
+  Overflow queue: past SYNC_RECOMPUTE_CAP the backdate is valued from the
+nearest snapshot (stock_engine_snapshots.get_state_before_event = snapshot + tail
 strictly before the event), future qty shifted via legacy
 update_qty_in_future_sle, outcome QUEUED (folded → RIV suppressed), and a
-Stock Refold row queued (one Queued row per key; earlier instant widens
-it). Worker: process_refold_queue (long queue, job_id dedupe, 25-min
-budget, re-kicks; hourly_long safety net). The tip fold state is left
-stale on purpose — self-healing when the job refolds the tail.
+Stock Recompute Request row queued (one Queued row per key; earlier instant widens
+it). Worker: process_recompute_queue (long queue, job_id dedupe, 25-min
+budget, re-kicks; hourly_long safety net). The tip engine state is left
+stale on purpose — self-healing when the job recomputes the tail.
   Stock Restatement: Stock Closing Entry.on_cancel → if it cancelled a
-live Opening Adjustment (i.e. it was the frontier) → start_for_closing.
-run_restatement: status In Progress → _slide_frontier (closing at the
+live Opening Adjustment (i.e. it was the frontier) → start_for_cancelled_closing.
+run_restatement: status In Progress → _ensure_previous_closing_and_opening_adjustment (closing at the
 previous closing's to_date or FY start − 1, created+submitted if missing;
 Opening Adjustment built and auto-submitted when within threshold or
-zero) → one Stock Refold per key with events after the new frontier →
+zero) → one Stock Recompute Request per key with events after the new frontier →
 process queue → finalize (Completed / Failed with keys_failed). GL
 corrections carried on the restatement (force_gl_adjustment, dated at
 each voucher's date). Lock: validate_no_running_restatement blocks SLEs
@@ -934,21 +934,21 @@ carries them; `sle` dropped from HASH_FIELDS); no quantity tolerance in
 the engine (QTY_EPSILON snapping — FIFO 0.7+0.1−0.8 tripped the state
 assertion); landed cost dropped on earlier receipts under Moving
 Average (merged-layer policies uplift the whole pool); hard deletes left
-fold state/checkpoints alive (writer invalidates; emitter removes
+engine state/snapshots alive (writer invalidates; emitter removes
 orphaned allocations); a backdated reco anchored the window at itself
 and was never projected; LCV cancel re-decided fold-vs-legacy from live
 state (cancel now follows the submit path; zero-total guard);
 Item.allow_negative_stock ignored by the fold; company allowlist not
-applied to revaluations; write_valuation invalidated only with
+applied to revaluations; update_valuation invalidated only with
 authority on; backfill serial allocations lacked declared_rate. Also:
 completeness check counts events joined to live SLEs, QUEUED path
 invalidates the tip state, queued rows widened/claimed by restatements
 and stale In Progress rows re-queued, opening adjustment re-photographs
-its closing after the baselines, mid-job commits removed from the
-flushers. Duplication collapsed into stock_engine_bridge (EVENT_FIELDS,
-events_from_rows, allocations_by_event, bundle_backed_sles,
-is_baseline); equivalent_value deleted. Battery: engine 63, authority
-13, read 5, refold 1, event 2, closing 7, opening adjustment 2,
+its closing after the opening assertions, mid-job commits removed from the
+flushers. Duplication collapsed into stock_engine_adapter (EVENT_FIELDS,
+make_engine_events, get_allocations_by_event, get_bundle_backed_sle_names,
+is_opening_assertion); equivalent_value deleted. Battery: engine 63, authority
+13, read 5, recompute 1, event 2, closing 7, opening adjustment 2,
 restatement 1, landed cost voucher 27 — all green (three errors seen
 once came from two test runs overlapping on the site).
 

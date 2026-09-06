@@ -473,9 +473,9 @@ class DisassembleStockEntry(BaseStockEntry):
 		for batch_no, batch_qty in batch_nos.items():
 			if qty_remaining <= 0:
 				break
-			alloc = min(abs(flt(batch_qty)) * scale_factor, qty_remaining)
-			batches[batch_no] = alloc
-			qty_remaining -= alloc
+			allocation = min(abs(flt(batch_qty)) * scale_factor, qty_remaining)
+			batches[batch_no] = allocation
+			qty_remaining -= allocation
 
 	def _extract_serial_nos(self, source_row, source_bundle, row):
 		if source_bundle.get("serial_nos"):

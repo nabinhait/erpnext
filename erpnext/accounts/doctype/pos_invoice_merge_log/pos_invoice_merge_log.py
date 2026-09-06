@@ -393,7 +393,7 @@ class POSInvoiceMergeLog(Document):
 		if not bundles:
 			return
 
-		stock_ledger_writer.clear_bundle_links(bundles)
+		stock_ledger_writer.unlink_bundles(bundles)
 
 	def get_serial_and_batch_bundles(self):
 		pos_invoices = []

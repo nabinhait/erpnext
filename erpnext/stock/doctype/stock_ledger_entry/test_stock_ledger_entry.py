@@ -1605,13 +1605,13 @@ class TestStockLedgerEntry(ERPNextTestSuite, StockTestMixin):
 
 		frappe.conf.log_unrouted_stock_writes = 1
 		try:
-			baseline = log_count()
+			opening_assertion = log_count()
 
 			sle.db_set({"to_rename": sle.to_rename})
-			self.assertEqual(log_count(), baseline + 1)
+			self.assertEqual(log_count(), opening_assertion + 1)
 
 			stock_ledger_writer.set_fields(sle, {"to_rename": sle.to_rename})
-			self.assertEqual(log_count(), baseline + 1)
+			self.assertEqual(log_count(), opening_assertion + 1)
 		finally:
 			frappe.conf.pop("log_unrouted_stock_writes", None)
 

@@ -106,7 +106,7 @@ def validate_stock_frozen_by_closing_entry(sl_entries):
 		get_closing_entry_for_closed_period,
 	)
 
-	closing_entry = get_closing_entry_for_closed_period(_sle_company(sl_entries))
+	closing_entry = get_closing_entry_for_closed_period(_get_company_from_sl_entries(sl_entries))
 	if closing_entry:
 		validate_not_dated_on_or_before(
 			sl_entries,
@@ -122,9 +122,9 @@ def validate_stock_frozen_by_closing_entry(sl_entries):
 
 
 def validate_no_running_restatement(sl_entries):
-	from erpnext.stock.doctype.stock_restatement.stock_restatement import running_restatement
+	from erpnext.stock.doctype.stock_restatement.stock_restatement import get_running_restatement
 
-	restatement = running_restatement(_sle_company(sl_entries))
+	restatement = get_running_restatement(_get_company_from_sl_entries(sl_entries))
 	if restatement:
 		validate_not_dated_on_or_before(
 			sl_entries,
@@ -145,7 +145,7 @@ def validate_not_dated_on_or_before(sl_entries, lock_date, message, title):
 			frappe.throw(message, title=title)
 
 
-def _sle_company(sl_entries):
+def _get_company_from_sl_entries(sl_entries):
 	return sl_entries[0].get("company") or frappe.get_cached_value(
 		"Warehouse", sl_entries[0].get("warehouse"), "company"
 	)
@@ -231,18 +231,18 @@ def repost_current_voucher(args, allow_negative_stock=False, via_landed_cost_vou
 			args["posting_date"] = nowdate()
 
 		if not (args.get("is_cancelled") and via_landed_cost_voucher):
-			from erpnext.stock.services import stock_fold_authority
+			from erpnext.stock.services import stock_engine_valuation
 
 			folded = None
 			if not via_landed_cost_voucher:
-				folded = stock_fold_authority.try_fold(args, allow_negative_stock)
+				folded = stock_engine_valuation.value_stock_ledger_entry(args, allow_negative_stock)
 
-			if folded in (stock_fold_authority.APPENDED, stock_fold_authority.QUEUED):
-				# quantities shift now; a queued refold values the later rows
+			if folded in (stock_engine_valuation.APPENDED, stock_engine_valuation.QUEUED):
+				# quantities shift now; a queued recompute values the later rows
 				update_qty_in_future_sle(args, allow_negative_stock)
 				return
-			if folded == stock_fold_authority.REFOLDED:
-				# the refold already rewrote future rows; only the validation remains
+			if folded == stock_engine_valuation.RECOMPUTED:
+				# the recompute already rewrote future rows; only the validation remains
 				args["posting_datetime"] = get_combine_datetime(args["posting_date"], args["posting_time"])
 				validate_negative_qty_in_future_sle(args, allow_negative_stock)
 				return
@@ -311,11 +311,11 @@ def validate_cancellation(kargs):
 
 
 def set_as_cancel(voucher_type, voucher_no):
-	stock_ledger_writer.flag_voucher_cancelled(voucher_type, voucher_no)
+	stock_ledger_writer.mark_voucher_cancelled(voucher_type, voucher_no)
 
 
 def make_entry(args, allow_negative_stock=False, via_landed_cost_voucher=False):
-	return stock_ledger_writer.submit_new(args, allow_negative_stock, via_landed_cost_voucher)
+	return stock_ledger_writer.insert_and_submit(args, allow_negative_stock, via_landed_cost_voucher)
 
 
 # A repost waits this long for another repost's per-(item, warehouse) gate before giving up. Kept
@@ -1216,7 +1216,7 @@ class update_entries_after:
 
 		sle.doctype = "Stock Ledger Entry"
 		sle.modified = now()
-		stock_ledger_writer.write_valuation(sle)
+		stock_ledger_writer.update_valuation(sle)
 
 		self.prev_sle_dict[key] = sle
 

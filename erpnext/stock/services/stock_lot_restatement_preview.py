@@ -16,38 +16,38 @@ reviewed per company before anything irreversible runs.
 import frappe
 from frappe.utils import flt
 
-from erpnext.stock.services import stock_engine_bridge
-from erpnext.stock.services.stock_shadow import _event_rows
+from erpnext.stock.services import stock_engine_adapter
+from erpnext.stock.services.stock_engine_parity_check import _get_event_rows
 
 MAX_KEYS = 200
 
 
-def run(warehouses: list[str] | None = None, value_tolerance: float = 0.01) -> dict:
-	engine = stock_engine_bridge.load_engine()
+def preview_lot_restatement(warehouses: list[str] | None = None, value_tolerance: float = 0.01) -> dict:
+	engine = stock_engine_adapter.get_engine()
 	report = {"keys_with_lots": 0, "keys_restated": 0, "total_delta": 0.0, "keys": [], "errors": []}
 
-	for item_code, warehouse in _lot_keys(warehouses):
-		policy = stock_engine_bridge.policy_for(item_code, engine)
+	for item_code, warehouse in _get_lot_keys(warehouses):
+		policy = stock_engine_adapter.get_valuation_policy(item_code, engine)
 		if policy is None:
 			continue
 
 		report["keys_with_lots"] += 1
-		rows = _event_rows(item_code, warehouse)
-		allocations = stock_engine_bridge.allocations_by_event([row.name for row in rows])
+		rows = _get_event_rows(item_code, warehouse)
+		allocations = stock_engine_adapter.get_allocations_by_event([row.name for row in rows])
 
 		try:
 			aggregate = engine.replay(
-				[stock_engine_bridge.to_event(engine, row) for row in rows],
-				engine.FoldContext(policy=policy),
+				[stock_engine_adapter.make_engine_event(engine, row) for row in rows],
+				engine.EngineContext(policy=policy),
 			).final
 			lot_level = engine.replay(
 				[
-					stock_engine_bridge.to_event(
+					stock_engine_adapter.make_engine_event(
 						engine, row, allocations.get(str(row.name)), honor_batch_flag=False
 					)
 					for row in rows
 				],
-				engine.FoldContext(policy=policy),
+				engine.EngineContext(policy=policy),
 			).final
 		except ValueError as error:
 			report["errors"].append((item_code, warehouse, str(error)))
@@ -73,7 +73,7 @@ def run(warehouses: list[str] | None = None, value_tolerance: float = 0.01) -> d
 	return report
 
 
-def _lot_keys(warehouses: list[str] | None) -> list[tuple[str, str]]:
+def _get_lot_keys(warehouses: list[str] | None) -> list[tuple[str, str]]:
 	"""Keys whose event history carries at least one lot allocation."""
 	event = frappe.qb.DocType("Stock Event")
 	allocation = frappe.qb.DocType("Stock Event Allocation")

@@ -8,7 +8,7 @@ Owned by a submitted Stock Closing Entry. Computing it folds every key of
 the company to the closing instant and lists engine truth next to legacy's
 stored balance; the full per-key result is attached to the document, the
 keys that differ are shown in the table. Submitting it pins every key with a
-baseline Assertion at engine values (batch sub-states seeded from the fold,
+opening_assertion Assertion at engine values (batch sub-states seeded from the fold,
 negative balances as exposure), books the net value difference per stock
 account against the adjustment account on the first open day, and shifts
 Bins by the same deltas. Cancelling the closing entry reopens the year and
@@ -26,7 +26,7 @@ from frappe.model.document import Document
 from frappe.utils import add_days, cint, flt, get_link_to_form
 from frappe.utils.background_jobs import enqueue
 
-from erpnext.stock.services import stock_engine_bridge, stock_fold_cutover, stock_fold_read
+from erpnext.stock.services import stock_engine_adapter, stock_engine_opening, stock_engine_snapshots
 
 QTY_TOLERANCE = 1e-6
 
@@ -63,7 +63,7 @@ class StockOpeningAdjustment(Document):
 	def validate(self):
 		closing = self.closing_entry()
 		self.validate_closing(closing)
-		self.moment = stock_engine_bridge.end_of_day(closing.to_date)
+		self.moment = stock_engine_adapter.get_end_of_day(closing.to_date)
 		self.posting_date = add_days(closing.to_date, 1)
 		if not self.adjustment_account:
 			self.adjustment_account = frappe.get_cached_value(
@@ -107,13 +107,16 @@ class StockOpeningAdjustment(Document):
 			frappe.throw(_("Adjustment Account is required to book the value delta"))
 
 	def on_submit(self):
-		rows = self.prepared_rows()
-		stock_fold_cutover.emit_baselines(
-			self.company, self.moment, (_baseline(row) for row in rows), owner=(self.doctype, self.name)
+		rows = self.get_prepared_rows()
+		stock_engine_opening.insert_opening_assertions(
+			self.company,
+			self.moment,
+			(_make_opening_assertion(row) for row in rows),
+			owner=(self.doctype, self.name),
 		)
 		# the closing photographed the keys at this same instant, before the
-		# baselines existed; reads must resume from the pinned history too
-		stock_fold_read.refresh_checkpoints(
+		# opening_assertions existed; reads must resume from the pinned history too
+		stock_engine_snapshots.refresh_snapshots(
 			self.company, self.closing_entry().to_date, self.stock_closing_entry
 		)
 		self.post_gl_entries(rows)
@@ -128,8 +131,8 @@ class StockOpeningAdjustment(Document):
 
 		self.ignore_linked_doctypes = ("GL Entry", "Stock Event")
 		make_reverse_gl_entries(voucher_type=self.doctype, voucher_no=self.name)
-		self.shift_bins(self.prepared_rows(), direction=-1)
-		stock_fold_cutover.invalidate_fold_state(self.company)
+		self.shift_bins(self.get_prepared_rows(), direction=-1)
+		stock_engine_opening.delete_company_engine_state(self.company)
 		self.db_set("status", "Cancelled")
 
 	def validate_reopen(self) -> None:
@@ -155,29 +158,29 @@ class StockOpeningAdjustment(Document):
 			)
 		)
 
-	def build(self) -> None:
+	def compute_differences(self) -> None:
 		"""Fold the company to the frontier and record engine truth against
 		legacy: the full result as an attachment, the differing keys in the
 		table, the totals on the document."""
-		rows = stock_fold_cutover.opening_delta(self.company, self.moment)
+		rows = stock_engine_opening.get_opening_differences(self.company, self.moment)
 		pinned = [row for row in rows if not row.get("skipped")]
 		self.keys = len(pinned)
 		self.skipped_keys = len(rows) - len(pinned)
 		self.total_delta = flt(sum(row.delta for row in pinned), 2)
 		self.threshold = flt(frappe.db.get_single_value("Stock Settings", "opening_adjustment_threshold"))
 		self.within_threshold = cint(self.threshold > 0 and abs(self.total_delta) <= self.threshold)
-		self.set("items", [_item_row(row) for row in pinned if _differs(row)])
+		self.set("items", [_make_item_row(row) for row in pinned if _has_difference(row)])
 		self.status = "Ready"
 		self.save()
-		self.attach_prepared(pinned)
+		self.attach_prepared_rows(pinned)
 
-	def attach_prepared(self, rows: list[frappe._dict]) -> None:
+	def attach_prepared_rows(self, rows: list[frappe._dict]) -> None:
 		for attachment in get_attachments(self.doctype, self.name):
 			frappe.delete_doc("File", attachment.name, ignore_permissions=True)
 		frappe.get_doc(
 			{
 				"doctype": "File",
-				"file_name": f"{frappe.scrub(self.name)}-baselines.json.gz",
+				"file_name": f"{frappe.scrub(self.name)}-opening_assertions.json.gz",
 				"attached_to_doctype": self.doctype,
 				"attached_to_name": self.name,
 				"content": gzip.compress(frappe.safe_encode(frappe.as_json(rows))),
@@ -185,17 +188,17 @@ class StockOpeningAdjustment(Document):
 			}
 		).save(ignore_permissions=True)
 
-	def prepared_rows(self) -> list[frappe._dict]:
+	def get_prepared_rows(self) -> list[frappe._dict]:
 		attachments = get_attachments(self.doctype, self.name)
 		if not attachments:
-			frappe.throw(_("Compute the adjustment first: no prepared baselines are attached"))
+			frappe.throw(_("Compute the adjustment first: no prepared opening_assertions are attached"))
 		content = frappe.get_doc("File", attachments[0].name).get_content()
 		return [frappe._dict(row) for row in json.loads(gzip.decompress(content).decode("utf-8"))]
 
 	def post_gl_entries(self, rows: list[frappe._dict]) -> None:
 		from erpnext.accounts.general_ledger import make_gl_entries
 		from erpnext.stock import get_warehouse_account_map
-		from erpnext.stock.services.stock_fold_refold import adjustment_pair
+		from erpnext.stock.services.stock_engine_recompute import make_adjustment_gl_pair
 
 		account_map = get_warehouse_account_map(self.company)
 		deltas: dict[str, float] = {}
@@ -214,13 +217,15 @@ class StockOpeningAdjustment(Document):
 		for account, delta in sorted(deltas.items()):
 			if abs(delta) < 0.005:
 				continue
-			gl_map.extend(adjustment_pair(args, account, self.adjustment_account, delta, self.posting_date))
+			gl_map.extend(
+				make_adjustment_gl_pair(args, account, self.adjustment_account, delta, self.posting_date)
+			)
 		if gl_map:
 			make_gl_entries(gl_map)
 
 	def shift_bins(self, rows: list[frappe._dict], direction: int) -> None:
 		"""Move each differing Bin by the engine-minus-legacy delta; the next
-		fold re-projects it exactly from the baseline."""
+		fold re-projects it exactly from the opening_assertion."""
 		from erpnext.stock.services import bin_writer
 		from erpnext.stock.utils import get_or_make_bin
 
@@ -250,18 +255,18 @@ class StockOpeningAdjustment(Document):
 def compute_opening_adjustment(name: str) -> None:
 	doc = frappe.get_doc("Stock Opening Adjustment", name)
 	try:
-		doc.build()
+		doc.compute_differences()
 	except Exception:
 		frappe.db.rollback()
 		doc.db_set("status", "Failed")
 		doc.log_error(title="Stock Opening Adjustment Failed")
 
 
-def _differs(row: frappe._dict) -> bool:
+def _has_difference(row: frappe._dict) -> bool:
 	return bool(flt(row.delta)) or abs(flt(row.engine_qty) - flt(row.legacy_qty)) > QTY_TOLERANCE
 
 
-def _item_row(row: frappe._dict) -> dict:
+def _make_item_row(row: frappe._dict) -> dict:
 	return {
 		"item_code": row.item_code,
 		"warehouse": row.warehouse,
@@ -273,7 +278,7 @@ def _item_row(row: frappe._dict) -> dict:
 	}
 
 
-def _baseline(row: frappe._dict) -> frappe._dict:
+def _make_opening_assertion(row: frappe._dict) -> frappe._dict:
 	return frappe._dict(
 		item_code=row.item_code,
 		warehouse=row.warehouse,

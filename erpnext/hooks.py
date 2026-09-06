@@ -499,7 +499,7 @@ scheduler_events = {
 		"erpnext.projects.doctype.project.project.hourly_reminder",
 	],
 	"hourly_long": [
-		"erpnext.stock.doctype.stock_refold.stock_refold.process_refold_queue",
+		"erpnext.stock.doctype.stock_recompute_request.stock_recompute_request.process_recompute_queue",
 	],
 	"hourly_maintenance": [
 		"erpnext.crm.doctype.appointment.appointment.handle_expired_unverified_appointments",
@@ -551,7 +551,7 @@ scheduler_events = {
 	"monthly_long": [
 		"erpnext.accounts.deferred_revenue.process_deferred_accounting",
 		"erpnext.accounts.utils.auto_create_exchange_rate_revaluation_monthly",
-		"erpnext.stock.services.stock_fold_read.create_monthly_fold_checkpoints",
+		"erpnext.stock.services.stock_engine_snapshots.create_monthly_snapshots",
 	],
 }
 

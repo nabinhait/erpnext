@@ -1,5 +1,21 @@
 # Stock Engine Redesign — Architecture Design Doc
 
+> **Vocabulary (code names since 2026-09-06).** This document explains the design in the
+> mathematical vocabulary it was written in; the code uses plain names. Read them side by side:
+>
+> | In this document | In the code |
+> |---|---|
+> | the fold, folding an event | `engine.apply_event` — valuing one event against the key's state |
+> | fold authority, fold-authoritative | `stock_engine_valuation` — the engine values ledger rows; site config `stock_engine_valuation` |
+> | refold, refolding | recompute — `stock_engine_recompute`, `Stock Recompute Request` (the queue) |
+> | fold state | `Stock Engine State` — the latest engine state per (item, warehouse) |
+> | checkpoint | `Stock Engine Snapshot` — a dated state photograph; `stock_engine_snapshots` reads from them |
+> | baseline (assertion) | opening assertion — an SLE-less assertion pinning a key at the cutover; `stock_engine_opening` |
+> | shadow mode, parity | `stock_engine_parity_check`, `stock_report_parity_check` |
+> | the bridge | `stock_engine_adapter` — rows ↔ engine types |
+> | emitter | `stock_event_writer` — the single write path for Stock Event |
+> | Stock Balance/Ledger/Ageing Fold reports | Engine Stock Balance / Ledger / Ageing |
+
 ## Context
 
 ERPNext's Stock module generates a persistent, recurring class of bugs: wrong valuation rates,
@@ -328,7 +344,7 @@ Three tiers, and the boundary between them is the whole design:
 | Tier | Mutability | Contents | If lost |
 |---|---|---|---|
 | **Facts** | Append-only, never updated | `Stock Event`, `Stock Event Allocation` | Catastrophic — this is the truth |
-| **Fold state** | Rewritable, deterministic | `Stock Balance` (tail), `Stock Checkpoint` (history) | Recomputable from facts |
+| **Engine state** | Rewritable, deterministic | `Stock Balance` (tail), `Stock Snapshot` (history) | Recomputable from facts |
 | **Projections** | Rewritable, disposable | `Bin`, `Serial No Position`, `tabStock Ledger Entry` (compat), GL | Recomputable (GL: *correctable*) |
 
 **A note on "stateless", since that word carries weight internally.** Quantity is a *sum* —
@@ -401,7 +417,7 @@ Backdating needs no special handling: a backdated event gets an early `posting_d
 `id`. The sort key handles it. **History is never rewritten to make room.**
 
 *Rejected — a gapless per-(item, warehouse) ordinal on the fact table.* Superficially attractive for
-cheap "events since checkpoint" reads, but fatal: a backdated event must slot into the middle, which
+cheap "events since snapshot" reads, but fatal: a backdated event must slot into the middle, which
 forces renumbering every subsequent row for that key — reintroducing exactly the O(n) write
 amplification this rewrite exists to eliminate. Per-key ordinals belong on the *projection*, where
 renumbering is cheap and non-authoritative.
@@ -506,13 +522,13 @@ cascades:
 | If the fold is pure | If it is not (today) |
 |---|---|
 | Replaying the same events always gives the same answer | Replay depends on data that may have changed since |
-| A checkpoint can be trusted as a resumption point | Checkpoints could encode a stale read |
+| A snapshot can be trusted as a resumption point | Snapshots could encode a stale read |
 | Convergence detection (§2.4) is sound | Cannot compare states meaningfully |
 | Unit-testable with plain data, no fixtures, no DB | Needs a full site to test |
 | Safe to run speculatively for validation or preview | Every dry run risks a write |
 
 So all policy inputs — valuation method, standard-cost schedule, negative-stock policy, lot-selection
-rule, precision — are resolved into a frozen `FoldContext` *before* folding starts. **This is enforced
+rule, precision — are resolved into a frozen `EngineContext` *before* folding starts. **This is enforced
 by a CI test that runs the fold with `frappe.db` replaced by an object that raises on any attribute
 access** (risk R8). It is a gate, not a convention.
 
@@ -527,7 +543,7 @@ Two further rules:
 #### What the fold buys, concretely
 
 1. **Backdating stops being a rewrite.** Insert an arrow; recompute boxes lazily from the nearest
-   checkpoint (§2.4).
+   snapshot (§2.4).
 2. **Convergence.** Because `f` is deterministic, if a recomputed state equals the previously recorded
    one, *every* later state is unchanged — stop early (§2.4).
 3. **One implementation, four policies.** FIFO/LIFO/Moving Average/Standard Cost are four `f`s behind
@@ -550,13 +566,13 @@ Each is a different `f`, replacing the branching tree inside the 188-line `proce
 | `StandardCost` | `(qty)` + rate schedule | **O(1)** — not path-dependent |
 | `SpecificIdentification` | per-lot `(qty, value)` | O(affected lot only) — falls out of §2.6 free |
 
-### 2.4 Checkpoints: bounding the cost of backdating
+### 2.4 Snapshots: bounding the cost of backdating
 
 **`Stock Balance`** — one row per `(company, item, warehouse, dimension_key)`: the *tail* state (qty,
 value, serialized layers, `last_event_id`, `version`). **The FIFO queue lives here, once per key,
 instead of once per SLE row.** This is also the lock row (§2.7).
 
-**`Stock Checkpoint`** — historical snapshots at **month-end grain per key**, created lazily, with
+**`Stock Snapshot`** — historical snapshots at **month-end grain per key**, created lazily, with
 `stale` flag and `input_digest`.
 
 **The primitive already exists.** `Stock Closing Balance` already stores exactly `item_code,
@@ -570,10 +586,10 @@ Balance report's opening query, Stock Ageing as-of dates, and period closing —
 four consumers, and invalidation is explainable to a user ("your backdated entry invalidated 14
 monthly snapshots").
 
-**Invalidation:** inserting at time `T` for key `K` sets `stale=1` on checkpoints for `K` after `T`.
-Cheap, indexed, ORM-expressible. Never delete — a stale checkpoint still records what the system used
+**Invalidation:** inserting at time `T` for key `K` sets `stale=1` on snapshots for `K` after `T`.
+Cheap, indexed, ORM-expressible. Never delete — a stale snapshot still records what the system used
 to believe, which matters for explaining a GL adjustment. **Read-repair:** any read landing on a
-stale checkpoint recomputes it first, so reports are never *wrong*, only slow the first time.
+stale snapshot recomputes it first, so reports are never *wrong*, only slow the first time.
 
 **Cost model for a backdated entry N days deep.** Let `E` = events after `T` for the key, `V` =
 distinct vouchers among them, `P` = periods spanned:
@@ -582,7 +598,7 @@ distinct vouchers among them, `P` = periods spanned:
 |---|---|---|
 | Sync work at submit | scan future SLEs; enqueue RIV | append event + update balance + mark `⌈N/30⌉` stale |
 | Ledger row writes | `O(E)` per-row `db_update()` | **0** |
-| Checkpoint writes | — | `O(N/30)` |
+| Snapshot writes | — | `O(N/30)` |
 | Source-document writes | `O(V)`, reloads parent per SLE | **0** |
 | GL | `O(V)` DELETE + `O(V)` INSERT, commit per 100 | `O(P)` adjustment vouchers |
 
@@ -602,7 +618,7 @@ between recomputing 150,000 rows and 400. It must be a named, tested, metric-ins
 write-back. So the unit of folding is **the voucher**, not the key.
 
 ```
-fold_voucher : (States{key -> State}, Voucher) -> (States', [Effect])
+apply_voucher : (States{key -> State}, Voucher) -> (States', [Effect])
 ```
 
 A transfer, Repack, Manufacture, or Subcontracting Receipt is folded in **one pass, one transaction**,
@@ -690,27 +706,27 @@ State` row tier) were both rejected. The settled model exploits what makes seria
 **a serial's cost story is derivable from facts** (exactly one inward movement until it returns),
 so it never needs to be carried in state:
 
-- **Serials never live in the fold state.** No sub-states in the blob, no per-lot row store. In
+- **Serials never live in the engine state.** No sub-states in the blob, no per-lot row store. In
   the fold, serial allocations are always quantity tags; they are stored as facts (position,
   traceability, recall — all sums over allocation rows, fast at any cardinality).
 - **`use_serialwise_valuation`** (Check, on Item, mirroring `use_batchwise_valuation`; fixed once
   the item has serialized stock history; default **on** for v15 continuity, switched off at item
   creation for mass-serialized goods) decides where an issue's rate comes from:
-  - *off* → Item-Warehouse wise: pool rate from Stock Fold State (FIFO/MA of the key).
+  - *off* → Item-Warehouse wise: pool rate from Stock Engine State (FIFO/MA of the key).
   - *on* → Serial-wise: the write path derives each picked serial's rate from its **last inward
     allocation's declared_rate**, stamps the issue event with it, and the engine's existing
-    rate-targeted consumption (`_take_at_rate`) prices the pool. State size is identical in both
+    rate-targeted consumption (`_consume_at_rate`) prices the pool. State size is identical in both
     modes — a million serials cost the fold nothing.
 - Pinned details: mixed-rate picks derive **rate buckets** (consume per group, not one blended
   rate — exact COGS, exact layers); the serial-rate lookup adds revaluation uplifts on the source
   receipt (Σ value_change ÷ receipt qty); a missing serial is aggregate pool exposure, not
   per-serial (its allocation stream still nets −1, so position queries flag it).
-- Consequences: `freeze_baseline` seeds only pools and batchwise batches; checkpoints stay small
+- Consequences: `create_opening_assertions` seeds only pools and batchwise batches; snapshots stay small
   everywhere; engine `LotState` sub-folds are exercised by **batches only**, whose per-key
   cardinality is naturally bounded — the `LOT_CARDINALITY_GUARDRAIL` (5,000, implemented in
-  `_save_state` and checkpoint creation) now effectively watches batch cardinality.
+  `_save_engine_state` and snapshot creation) now effectively watches batch cardinality.
 
-*Why batch sub-states stay in fold state (asked 2026-09-04: "doesn't it break normalization?").*
+*Why batch sub-states stay in engine state (asked 2026-09-04: "doesn't it break normalization?").*
 A serial's rate is path-independent (one inward movement → point lookup → no state). A batchwise
 batch's rate is a **running average — path-dependent**: derivable only by folding the batch's
 whole movement history in order. The three options are recompute-per-read (legacy's
@@ -718,7 +734,7 @@ whole movement history in order. The three options are recompute-per-read (legac
 (wrong under backdating — a backdated receipt changes what the avg *was* at every later issue),
 or **memoize the running state** — the only fast-and-correct-under-reordering choice.
 Normalization protects source-of-truth data; facts (events + allocations) are fully normalized,
-while fold state and checkpoints are materialized views under explicit invalidation discipline —
+while engine state and snapshots are materialized views under explicit invalidation discipline —
 deletable at any moment, rebuilt from facts, trusted by nothing. The design law is "no
 *authoritative* derived state", not "no derived state"; legacy's sin was derived state that
 things trusted.
@@ -752,8 +768,8 @@ is *incidental gap locks*, i.e. not a design.
 bypassed. Ship a concurrency fuzz test (N workers, overlapping multi-warehouse Stock Entries) as a
 permanent CI gate.
 
-**Critical section holds only:** append events, update the balance row, mark checkpoints stale,
-enqueue correction jobs. O(1) per key. Everything else — checkpoint refresh, GL posting, `Bin`
+**Critical section holds only:** append events, update the balance row, mark snapshots stale,
+enqueue correction jobs. O(1) per key. Everything else — snapshot refresh, GL posting, `Bin`
 projection, reports — happens outside. This is why the layers blob must live on the balance row:
 reading it must not require touching history.
 
@@ -887,16 +903,16 @@ there is no residue to sweep into an expense account. (Genuine inter-company tra
 price are a different case and keep an explicit margin posting — the point is that it becomes
 *deliberate* rather than a rounding artifact.)
 
-**The reconciliation control:** at period close, assert `Σ GL on stock accounts == Σ Stock Checkpoint
+**The reconciliation control:** at period close, assert `Σ GL on stock accounts == Σ Stock Snapshot
 value`. **Mismatch blocks the close.** That single assert replaces
 `stock_and_account_value_comparison` as a report someone must remember to run.
 
 ### 2.9 Reporting
 
-**No report reconstructs valuation.** If it needs valuation state it reads a checkpoint; a stale
-checkpoint is materialized by the read path.
+**No report reconstructs valuation.** If it needs valuation state it reads a snapshot; a stale
+snapshot is materialized by the read path.
 
-- **Stock Balance**: opening = checkpoint at period start (indexed read); closing = checkpoint +
+- **Stock Balance**: opening = snapshot at period start (indexed read); closing = snapshot +
   ≤1 month fold; in/out = one grouped `Sum()`. The Python row-by-row aggregation disappears.
 - **Stock Ageing**: **the layers are the age buckets** — each carries `source_event_id` → receipt
   date. Ageing as of today = read `Stock Balance` and bucket the layers. **Zero history read.** This
@@ -910,11 +926,11 @@ checkpoint is materialized by the read path.
 
 **Historical treatment — decided (2026-09-04, Nabin): freeze the past as-is, clean forward.**
 History keeps legacy's stored values untouched (including its negative-MA math); at cutover,
-`stock_fold_cutover.freeze_baseline(company)` emits one SLE-less **baseline Assertion** per key
+`stock_engine_opening.create_opening_assertions(company)` emits one SLE-less **opening assertion Assertion** per key
 pinning legacy's stored closing balance — a negative balance freezes as modelled exposure at the
 stored rate and is settled with a true-up by the next receipts, lots (batchwise batches, live
 serials) are seeded as sub-states, quantity-tag batches ride the pool. Facts only: no SLE, no GL,
-no repricing. Refolds and rebuilds never walk behind the latest baseline; backdates into the
+no repricing. Recomputes and rebuilds never walk behind the latest opening assertion; backdates into the
 frozen era fall back to the legacy engine. Closed books restated: never.
 
 The case *for* removing it is real and should be stated: when quantity goes negative, FIFO is
@@ -984,7 +1000,7 @@ definition, one clock. (Note this is a third variant of the same value — §1.5
 a 4-term and a 2-term formula used in different places.)
 
 Policy stays configurable per company/item/warehouse, evaluated by the fold from the frozen
-`FoldContext`. Add a **Negative Stock Exposure** view: what is negative right now, by how much, since
+`EngineContext`. Add a **Negative Stock Exposure** view: what is negative right now, by how much, since
 when, and what provisional value is at risk. Today negative stock is invisible until someone
 remembers to run a report.
 
@@ -1004,7 +1020,7 @@ Targets, measured on the largest realistic dataset, both MariaDB and Postgres:
 
 | Metric | Today (to be measured) | Target |
 |---|---|---|
-| Submit p99, 20-line Stock Entry, hot item | baseline | **< 300 ms**, and *flat* as ledger depth grows |
+| Submit p99, 20-line Stock Entry, hot item | opening assertion | **< 300 ms**, and *flat* as ledger depth grows |
 | Backdated entry 1 year deep, synchronous portion | enqueues RIV; work is unbounded | **< 1 s**, independent of depth |
 | Same, total work to full consistency | minutes to hours | **< 30 s** at p95 |
 | Stock Ageing, whole company, as of today | full-history replay in Python | **< 3 s** — reads balance rows only |
@@ -1147,12 +1163,12 @@ should be scoped deliberately rather than assumed to fall out of the rewrite.
 | `amount_difference_with_purchase_invoice` is a `Currency` field with **no `options`** — holds base currency, renders in system default currency | `purchase_receipt_item.json:1118` |
 | It is computed as `billed_amt/qty − rate × conversion_rate` — a **net-vs-gross asymmetry** if the receipt row has a discount — and rounded with a transaction-currency precision | `purchase_receipt/services/billing_status.py:250-258` |
 
-In the target design, precision is part of the frozen `FoldContext`, resolved per company, and applied
+In the target design, precision is part of the frozen `EngineContext`, resolved per company, and applied
 identically on every path — because there is only one path.
 
 ### 2.13 Invariants: from "checked by report" to "cannot happen"
 
-**(S)** structurally impossible · **(U)** unique constraint · **(W)** write-time assert · **(C)** checkpoint assert
+**(S)** structurally impossible · **(U)** unique constraint · **(W)** write-time assert · **(C)** snapshot assert
 
 | Invariant | Today's detector | Mechanism |
 |---|---|---|
@@ -1162,7 +1178,7 @@ identically on every path — because there is only one path.
 | `valuation_rate = value/qty` | `stock_ledger_invariant_check` | **(S)** not stored |
 | `Bin = ledger` | none (silent; auto-repair job) | **(S)** projection |
 | `Σ GL = Σ stock value` | `stock_and_account_value_comparison` | **(W)** same fold output, same txn; **(C)** blocks period close |
-| `Σ lot qty = item-wh qty` | `stock_qty_vs_batch_qty`, `negative_batch_report` | **(W)** `Σ alloc.qty == qty_change`; **(S)** `batch_qty` deleted |
+| `Σ lot qty = item-wh qty` | `stock_qty_vs_batch_qty`, `negative_batch_report` | **(W)** `Σ allocation.qty == qty_change`; **(S)** `batch_qty` deleted |
 | serial count = qty | `stock_qty_vs_serial_no_count` | **(W)** allocations ±1, per-serial balance ∈ {0,1} |
 | `Serial No.warehouse` = ledger | `incorrect_serial_no_valuation` | **(S)** column removed |
 | Bundle ↔ SLE consistency | `incorrect_serial_and_batch_bundle` | **(S)** parallel ledger deleted |
@@ -1171,7 +1187,7 @@ identically on every path — because there is only one path.
 | No duplicate posting per voucher row | 4 ad-hoc dedup mechanisms | **(U)** unique constraint |
 
 **Eleven reports become one job.** Only class **(C)** needs background verification, and it runs as
-part of checkpoint computation — not as something an admin must remember. The weekly auto-repair job
+part of snapshot computation — not as something an admin must remember. The weekly auto-repair job
 is deleted: a system needing scheduled self-repair is telling you its invariants aren't enforced.
 
 ### 2.14 Verification: the testing ladder
@@ -1186,7 +1202,7 @@ generated event sequences — thousands of orderings no hand-written test would 
 encode:
 
 - `state.value == Σ layer.qty × layer.rate` and `state.qty == Σ layer.qty` after every step
-- folding from any prefix checkpoint equals the single full fold (checkpoint soundness — the
+- folding from any prefix snapshot equals the single full fold (snapshot soundness — the
   property that makes §2.4 trustworthy)
 - convergence detection never stops early wrongly: wherever it stops, a full replay agrees
 - an `Assertion` erases path-dependence: any two histories ending in the same assertion agree on
@@ -1197,7 +1213,7 @@ encode:
 
 The seed exists twice over: `erpnext/stock/tests/test_valuation.py` already runs Hypothesis against
 today's `valuation.py`, and `erpnext/stock/engine/` is the vendored fold implementation (originally seeded by a demo script) +
-checkpoint + convergence mechanics. Rung 1 is those two taken to the extreme.
+snapshot + convergence mechanics. Rung 1 is those two taken to the extreme.
 *Proves:* the valuation logic, for any sequential history. *Cannot see:* concurrency, the database,
 the framework.
 
@@ -1216,7 +1232,7 @@ replays exactly. Feasible here precisely because the core is pure and all I/O is
 edges. Aspirational — adopt once rung 2 is routine.
 
 **Rung 4 — Formal methods, deliberately scoped.** A TLA+/Alloy model of the **concurrency protocol
-only**: lock acquisition order, single-writer-per-key, checkpoint invalidation/staleness. That
+only**: lock acquisition order, single-writer-per-key, snapshot invalidation/staleness. That
 state space is small enough for model checking, and it is where design-level races hide.
 Theorem-proving the valuation logic itself (Lean et al.) is explicitly deferred: Hypothesis
 delivers ~95% of that assurance at ~5% of the cost, and proving is not our core competency.
@@ -1245,7 +1261,7 @@ flowchart LR
   end
   subgraph S["FOLD STATE — deterministic, recomputable"]
     B["Stock Balance<br/>tail state + layers"]
-    C["Stock Checkpoint<br/>month-end snapshots"]
+    C["Stock Snapshot<br/>month-end snapshots"]
   end
   subgraph P["PROJECTIONS — disposable"]
     BIN["Bin"]
@@ -1299,9 +1315,9 @@ Correct new history:
 With four rows this is trivial. With 150,000 rows on a fast-moving item it is an hours-long job
 holding locks, and it is the origin of most "reposting stuck / timed out / wrong valuation" reports.
 
-**Target.** Insert one immutable `Stock Event`. Mark stale the month-end checkpoints after Jan 15
+**Target.** Insert one immutable `Stock Event`. Mark stale the month-end snapshots after Jan 15
 (four rows). Nothing in the ledger is rewritten — **ever**. Recomputation folds forward from the
-January checkpoint, lazily or in a background job, and produces new checkpoints. GL gets one
+January snapshot, lazily or in a background job, and produces new snapshots. GL gets one
 adjustment for the −20 COGS change (§2.8), posted in an open period.
 
 **Now add convergence.** Suppose an Apr 15 Stock Reconciliation asserts *"balance is 20 units at rate
@@ -1443,7 +1459,7 @@ write logger.
 *Status 2026-09-05: M0–M6 built and validated (real-data gates on apnaklub passed; see
 `stock_engine_program_log.md` for the program log and current resume snapshot). Sequencing below is
 superseded by "The v17 cutover: frozen frontier" section for everything from M4's gate onward —
-Stock Opening Adjustment built 2026-09-05 (3dc25fb8), reopen restatement and the refold overflow
+Stock Opening Adjustment built 2026-09-05 (3dc25fb8), reopen restatement and the recompute overflow
 queue 2026-09-06 (eea2cc91c1); remaining build: the v17 migration patch. The SLE-absorbs-Stock-Event schema step is deferred
 (Nabin, 2026-09-05) until the dual-write + shadow stack has been verified on production sites. Branch: `stock-ledger-redesign`, rebased on develop, engine vendored at
 `erpnext/stock/engine/`.*
@@ -1461,8 +1477,8 @@ Each milestone has an explicit gate; the next does not start until it passes.
 
 | # | Milestone | Effort | Gate |
 |---|---|---|---|
-| M0 | **Credibility + baseline** — ship Appendix A/B.5 fixes as standalone PRs; build the dataset generator + benchmark harness (§2.11); measure today's baseline | immediate, parallel with everything | Baseline exists; convergence hit-rate ≥ ~50% on realistic generated data — else revisit the design before implementing anything |
-| M1 | **Pure-core POC** — the package: fold engine, four policies, lot sub-states, checkpoints/convergence (vendored at `erpnext/stock/engine/`); Hypothesis suite (§2.14 rung 1) | parallel with M2 | Property suite green across generated corpora; package API reviewed against this doc |
+| M0 | **Credibility + opening assertion** — ship Appendix A/B.5 fixes as standalone PRs; build the dataset generator + benchmark harness (§2.11); measure today's opening assertion | immediate, parallel with everything | Opening assertion exists; convergence hit-rate ≥ ~50% on realistic generated data — else revisit the design before implementing anything |
+| M1 | **Pure-core POC** — the package: fold engine, four policies, lot sub-states, snapshots/convergence (vendored at `erpnext/stock/engine/`); Hypothesis suite (§2.14 rung 1) | parallel with M2 | Property suite green across generated corpora; package API reviewed against this doc |
 | M2 | **Phase 0** — SLE/Bin write chokepoints, external-write logger, scheduled Stock Closing Entry | 6–8 wks, 1–2 devs | 100% of writes through chokepoints; every external writer identified |
 | M3 | **Phase 1** — new doctypes, dual-write, backfill | 1 qtr, 2–3 devs | Backfill reproduces the legacy total order exactly; fact hashes verify |
 | M4 | **Phase 2** — shadow mode; rung-2 fuzzing becomes permanent CI; scoped TLA+ model (rung 4) alongside | 2 qtrs | Zero category (a)/(b) diffs for N consecutive days **and** GL reconciliation passes |
@@ -1491,21 +1507,21 @@ a sequence-backed numeric id for the `(posting_datetime, id)` total order. The s
 doctype was scaffolding for the dual-write/shadow era and does not ship. Every integration that
 reads SLE keeps working.
 
-**What the migration does** (one resumable, per-key-checkpointed patch; dry-runnable on a copy):
+**What the migration does** (one resumable, per-key-snapshotted patch; dry-runnable on a copy):
 
-1. Folds full history once with the engine; while passing, persists **checkpoints at every
+1. Folds full history once with the engine; while passing, persists **snapshots at every
    historical FY boundary** (nearly free — it is folding anyway).
 2. Creates and submits a **Stock Closing Entry at last-FY end** for every company, uncondition-
    ally — many sites never submit PCVs, and the frontier must not depend on closing discipline.
-3. Posts the **opening adjustment** at current-FY start: a first-class document owning its baseline
+3. Posts the **opening adjustment** at current-FY start: a first-class document owning its opening assertion
    assertion facts (lot-seeded, negative balances as exposure) and one GL delta entry — engine
    truth vs legacy stored, item-wise breakdown attached. Above a configurable delta threshold the
    migration **stops and asks** instead of silently booking. *Built: `Stock Opening Adjustment`
-   (3dc25fb8) — owned by the frontier Stock Closing Entry, baselines at engine values, GL netted per
+   (3dc25fb8) — owned by the frontier Stock Closing Entry, opening assertions at engine values, GL netted per
    stock account against `Company.stock_adjustment_account` on the first open day, Bins shifted,
    `within_threshold` from `Stock Settings.opening_adjustment_threshold`; cancelled only through
    its closing entry.*
-4. **Refolds the current FY** (sites migrate mid-year) from the corrected opening — an open-period
+4. **Recomputes the current FY** (sites migrate mid-year) from the corrected opening — an open-period
    rewrite, legally fine, bounded by one year of volume.
 5. Closed years keep legacy's stored values byte-for-byte, wrong or not.
 
@@ -1518,7 +1534,7 @@ what the backdate touched." Cancelling the frontier's Stock Closing Entry theref
 whole year to engine truth (queued, resumable job — the first reopen of a legacy year is the
 expensive one; the period stays locked while it runs). *Built (eea2cc91c1): `Stock Restatement`, started
 by the closing's cancel, slides the frontier back (closing + Opening Adjustment at the previous
-closing or fiscal-year start), queues one `Stock Refold` per key, locks stock up to the reopened
+closing or fiscal-year start), queues one `Stock Recompute Request` per key, locks stock up to the reopened
 date until Completed.* The old adjustment recomputes to ≈0 and a
 fresh one materializes at the reopened year's own start: the correction slides back one boundary,
 closer to where the errors originated. Reopening must go **newest-first**. A site that eventually
@@ -1535,17 +1551,17 @@ replacement also posts today. (Reversing entries, applied to inventory.)
 | State of last year | Backdated entry |
 |---|---|
 | Stock closing submitted | Blocked — cancel it to reopen (reopen = migrate the year; adjustment slides back) |
-| Closing cancelled, PCV submitted | Refolds; stock reprices in-year, GL corrections clamp to the open period (§ closed-period clamp) |
-| No closing, no PCV | Just works — full refold across the FY boundary, stock and GL reprice at true as-of dates, adjustment untouched (it sits deeper, at the actual frontier) |
-| Beyond `REFOLD_CAP` | Same semantics, queued as a background refold instead of sync — *built (eea2cc91c1): own row valued from the nearest checkpoint, quantities shifted now, `Stock Refold` row processed by the queue worker* |
+| Closing cancelled, PCV submitted | Recomputes; stock reprices in-year, GL corrections clamp to the open period (§ closed-period clamp) |
+| No closing, no PCV | Just works — full recompute across the FY boundary, stock and GL reprice at true as-of dates, adjustment untouched (it sits deeper, at the actual frontier) |
+| Beyond `SYNC_RECOMPUTE_CAP` | Same semantics, queued as a background recompute instead of sync — *built (eea2cc91c1): own row valued from the nearest snapshot, quantities shifted now, `Stock Recompute Request` row processed by the queue worker* |
 
-`stock_frozen_upto` keeps working as an additional soft gate. The baseline guard is **conditional on
-the lock** (implemented 78e6ee97): a baseline emitted with a `closing_entry` is owned by that Stock
+`stock_frozen_upto` keeps working as an additional soft gate. The opening assertion guard is **conditional on
+the lock** (implemented 78e6ee97): a opening assertion emitted with a `closing_entry` is owned by that Stock
 Closing Entry and locks only while it stays submitted — cancelling the closing revokes it, the
-frontier resolves to the previous active baseline, and revoked baseline rows are dropped from every
-replay so a stale pin can never reset a reopened key. Unowned baselines stay unconditional.
+frontier resolves to the previous active opening assertion, and revoked opening assertion rows are dropped from every
+replay so a stale pin can never reset a reopened key. Unowned opening assertions stay unconditional.
 
-**Checkpoints vs closings — decoupled** (implemented 3279c4a8): a checkpoint is a disposable
+**Snapshots vs closings — decoupled** (implemented 3279c4a8): a snapshot is a disposable
 performance artifact with no locking power, cut silently by a monthly scheduled job (idempotent, no
 setting) and on closing submit; a Stock Closing Entry is the lock — manual, deliberate, like a PCV,
 never auto-submitted.
@@ -1562,7 +1578,7 @@ never auto-submitted.
   tooling, not a write path) — the no-rollback-lever hedge.
 
 The shape to notice: **risk is front-loaded into the cheap milestones.** M0+M1 are small, parallel,
-and produce all three abort signals — baseline economics, convergence rate, property-test failures —
+and produce all three abort signals — opening assertion economics, convergence rate, property-test failures —
 before any headcount is committed to M3+. Everything through M5 is a flag-flip rollback; only M6 is
 one-way. Value lands incrementally: M0's fixes stand alone, M2's write logger has immediate
 diagnostic value, and scheduled closing entries speed reports before cutover.
@@ -1721,7 +1737,7 @@ resumability, run against a read replica.
 
 **R8 — Someone puts a DB call inside the fold.** This is the most likely way the design silently
 degrades back into the current one — `process_sle` does exactly this today. Once the fold isn't pure,
-replay is non-deterministic, convergence detection breaks, and checkpoints can't be trusted.
+replay is non-deterministic, convergence detection breaks, and snapshots can't be trusted.
 *Mitigation:* a permanent CI test that runs the fold with `frappe.db` replaced by an object raising
 on any attribute access. **A gate, not a convention.**
 
@@ -1734,7 +1750,7 @@ Several are also cheap ways to build credibility before proposing a multi-quarte
 
 | # | Location | Issue |
 |---|---|---|
-| A1 | `stock_ledger.py:556-559` | `except Exception: return frappe._dict()` on the repost checkpoint file. A corrupt/missing gz file silently empties `repost_affected_transaction`, so affected vouchers drop out of GL reposting **with no error**. Should fail loudly. |
+| A1 | `stock_ledger.py:556-559` | `except Exception: return frappe._dict()` on the repost snapshot file. A corrupt/missing gz file silently empties `repost_affected_transaction`, so affected vouchers drop out of GL reposting **with no error**. Should fail loudly. |
 | A2 | `repost_item_valuation.py:227` | `reset_field_values()` unconditionally sets `allow_negative_stock = 1`, disabling negative-stock validation for **every** background repost. |
 | A3 | `accounts/utils.py:1729` | `_delete_gl_entries` physically deletes GL rows with **no** period / freeze / PCV check. |
 | A4 | `stock_reservation_entry.py:1915-1924` | In `update_serial_batch_delivered_qty`, `query.run()` sits **outside** the `for` loop in the batch branch — only the last batch's update executes. |
@@ -1784,7 +1800,7 @@ accurate but the proposal is a feature (51669).
 | Issue | Finding | Root cause |
 |---|---|---|
 | **#49463** (20 comments) | Reconciliation on dimensioned stock corrupts dimension-wise balances. **Two mechanisms**, one of which the entire thread missed: an undimensioned reco SLE sets `qty_after_transaction` while contributing `actual_qty = 0`, so dimension-wise reports never see the reset; **and** `get_stock_balance` filters by dimension to pick the last dimensioned SLE, then returns its `qty_after_transaction` — a field keyed on `(item_code, warehouse)` only. The "current qty" for a dimensioned row is the **whole-warehouse balance**. | stored-derived-state + dimensions |
-| **#29183** (maintainer) | Checkpoints *were* added via Stock Closing Entry, but `start_from` is set only when a closing entry exists (`stock_balance.py:113-117`). Without one, the report still replays all history in Python. | report-recomputes-history |
+| **#29183** (maintainer) | Snapshots *were* added via Stock Closing Entry, but `start_from` is set only when a closing entry exists (`stock_balance.py:113-117`). Without one, the report still replays all history in Python. | report-recomputes-history |
 | **#51611** | `make_sl_entries` does per-row `get_or_make_bin`, per-row `Bin.reserved_stock` read, per-row `repost_current_voucher` and `update_bin_qty`. No bulk prefetch anywhere. | performance/N+1 |
 | **#57762** | `get_batch_stock_before_date` compares `Serial and Batch Entry.creation` against `Stock Ledger Entry.creation` — **a cross-doctype ordering key** — so a Repack's inward row sorts "before" the outward SLE and blends into the source rate. | dual serial/batch |
 | **#51562** (internal) | `future_sle_exists` is a **non-locking read** (`stock_controller.py:726-738`), so a concurrently-uncommitted SLE is invisible and no repost is queued. `sle_processing_gate` mitigates — **but is postgres-only**; on MariaDB it is a no-op. | concurrency |
@@ -1849,7 +1865,7 @@ The deliverable is a document, so verification is review-based:
    consistency reports the design must name the mechanism making it unnecessary. Any report without
    an answer means the design is incomplete.
 3. **The cost model must be falsified before Phase 1**, via the benchmark harness and targets in
-   §2.11. Specifically: build the dataset generator, measure today's baseline, and confirm the
+   §2.11. Specifically: build the dataset generator, measure today's opening assertion, and confirm the
    convergence hit rate clears 50%. If it does not, §2.4's backdating story is materially weaker and
    the design must be revisited *before* Phase 1, not after.
 4. **Phase 2 is the real gate.** Shadow-mode diff on production data is the objective measure. Nothing

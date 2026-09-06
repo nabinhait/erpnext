@@ -8,7 +8,7 @@ restates the whole reopened period to engine truth instead of repricing
 only what a backdate touched. The job slides the frontier one closing back
 (a submitted closing at the previous frontier and its Stock Opening
 Adjustment, auto-submitted within the threshold or when zero), queues one
-Stock Refold per key with events after that frontier, and works through
+Stock Recompute Request per key with events after that frontier, and works through
 them; GL corrections are append-only rows carried on the restatement,
 dated at each affected voucher's own posting date. Stock stays locked up
 to the reopened date while the restatement runs. Resumable: the hourly
@@ -23,7 +23,7 @@ from frappe.model.document import Document
 from frappe.utils import add_days, flt
 from frappe.utils.background_jobs import enqueue
 
-from erpnext.stock.services import stock_engine_bridge
+from erpnext.stock.services import stock_engine_adapter
 
 RUNNING = ("Queued", "In Progress")
 
@@ -53,10 +53,10 @@ class StockRestatement(Document):
 
 	@property
 	def moment(self) -> str:
-		return stock_engine_bridge.end_of_day(self.from_date)
+		return stock_engine_adapter.get_end_of_day(self.from_date)
 
 
-def running_restatement(company: str) -> frappe._dict | None:
+def get_running_restatement(company: str) -> frappe._dict | None:
 	"""The restatement currently locking the company's stock, if any."""
 	return frappe.db.get_value(
 		"Stock Restatement",
@@ -67,13 +67,13 @@ def running_restatement(company: str) -> frappe._dict | None:
 	)
 
 
-def start_for_closing(closing) -> str:
+def start_for_cancelled_closing(closing) -> str:
 	"""Queue the restatement for a cancelled frontier closing."""
 	doc = frappe.get_doc(
 		doctype="Stock Restatement",
 		company=closing.company,
 		cancelled_closing_entry=closing.name,
-		from_date=_previous_frontier(closing),
+		from_date=_get_previous_closing_date(closing),
 		to_date=closing.to_date,
 	).insert(ignore_permissions=True)
 	enqueue(run_restatement, name=doc.name, queue="long", timeout=4 * 3600)
@@ -81,16 +81,16 @@ def start_for_closing(closing) -> str:
 
 
 def run_restatement(name: str) -> None:
-	from erpnext.stock.doctype.stock_refold.stock_refold import process_refold_queue
+	from erpnext.stock.doctype.stock_recompute_request.stock_recompute_request import process_recompute_queue
 
 	doc = frappe.get_doc("Stock Restatement", name)
 	try:
 		doc.db_set("status", "In Progress")
-		_slide_frontier(doc)
-		_queue_keys(doc)
+		_ensure_previous_closing_and_opening_adjustment(doc)
+		_enqueue_recompute_for_active_keys(doc)
 		if not frappe.in_test:
 			frappe.db.commit()
-		process_refold_queue(restatement=doc.name)
+		process_recompute_queue(restatement=doc.name)
 	except Exception:
 		if frappe.in_test:
 			raise
@@ -102,7 +102,9 @@ def run_restatement(name: str) -> None:
 def finalize_if_done(name: str) -> None:
 	"""Completed once every queued key has run; Failed if any key could
 	not fold (its legacy values stay and the row carries the reason)."""
-	counts = Counter(frappe.get_all("Stock Refold", filters={"stock_restatement": name}, pluck="status"))
+	counts = Counter(
+		frappe.get_all("Stock Recompute Request", filters={"stock_restatement": name}, pluck="status")
+	)
 	if counts.get("Queued") or counts.get("In Progress"):
 		return
 	failed = counts.get("Failed", 0)
@@ -117,7 +119,7 @@ def finalize_if_done(name: str) -> None:
 	)
 
 
-def _previous_frontier(closing) -> str:
+def _get_previous_closing_date(closing) -> str:
 	"""The closing before the reopened one, or the day before its fiscal year."""
 	from erpnext.accounts.utils import get_fiscal_year
 
@@ -133,7 +135,7 @@ def _previous_frontier(closing) -> str:
 	return str(add_days(fiscal_year.year_start_date, -1))
 
 
-def _slide_frontier(doc: StockRestatement) -> None:
+def _ensure_previous_closing_and_opening_adjustment(doc: StockRestatement) -> None:
 	"""A submitted closing at the previous frontier (created if missing) and
 	the opening adjustment that pins engine truth there."""
 	closing_name = frappe.db.get_value(
@@ -145,10 +147,15 @@ def _slide_frontier(doc: StockRestatement) -> None:
 		)
 		closing.submit()
 		closing_name = closing.name
-	doc.db_set({"frontier_closing_entry": closing_name, "opening_adjustment": _adjust(doc, closing_name)})
+	doc.db_set(
+		{
+			"frontier_closing_entry": closing_name,
+			"opening_adjustment": _get_or_create_opening_adjustment(doc, closing_name),
+		}
+	)
 
 
-def _adjust(doc: StockRestatement, closing_name: str) -> str:
+def _get_or_create_opening_adjustment(doc: StockRestatement, closing_name: str) -> str:
 	live = frappe.db.get_value(
 		"Stock Opening Adjustment", {"stock_closing_entry": closing_name, "docstatus": 1}, "name"
 	)
@@ -157,16 +164,16 @@ def _adjust(doc: StockRestatement, closing_name: str) -> str:
 	adjustment = frappe.get_doc(
 		doctype="Stock Opening Adjustment", company=doc.company, stock_closing_entry=closing_name
 	).insert(ignore_permissions=True)
-	adjustment.build()
+	adjustment.compute_differences()
 	if adjustment.within_threshold or not flt(adjustment.total_delta):
 		adjustment.submit()
 	return adjustment.name
 
 
-def _queue_keys(doc: StockRestatement) -> None:
-	from erpnext.stock.doctype.stock_refold.stock_refold import enqueue_refolds
-	from erpnext.stock.services.stock_fold_read import active_keys
+def _enqueue_recompute_for_active_keys(doc: StockRestatement) -> None:
+	from erpnext.stock.doctype.stock_recompute_request.stock_recompute_request import enqueue_recomputes
+	from erpnext.stock.services.stock_engine_snapshots import get_active_item_warehouse_keys
 
-	keys = active_keys(doc.company, after=doc.moment)
-	enqueue_refolds(keys, doc.company, doc.moment, doc.name)
+	keys = get_active_item_warehouse_keys(doc.company, after=doc.moment)
+	enqueue_recomputes(keys, doc.company, doc.moment, doc.name)
 	doc.db_set("keys_total", len(keys))

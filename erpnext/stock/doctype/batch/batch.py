@@ -191,17 +191,15 @@ class Batch(Document):
 			self.use_batchwise_valuation = 1
 
 	def after_rename(self, old_name, new_name, merge=False):
-		self.invalidate_fold_state()
+		self.delete_company_engine_state()
 
-	def invalidate_fold_state(self):
-		"""Fold state and checkpoints memoize batchwise lot ids inside their
+	def delete_company_engine_state(self):
+		"""Engine state and snapshots memoize batchwise lot ids inside their
 		state blobs, which rename machinery cannot rewrite. Drop them — they
 		rebuild from facts, which carry the new name."""
-		from erpnext.stock.services import stock_fold_authority
+		from erpnext.stock.services import stock_engine_valuation
 
-		parents = frappe.get_all(
-			"Stock Event Allocation", filters={"batch_no": self.name}, pluck="parent"
-		)
+		parents = frappe.get_all("Stock Event Allocation", filters={"batch_no": self.name}, pluck="parent")
 		if not parents:
 			return
 		keys = frappe.get_all(
@@ -211,7 +209,7 @@ class Batch(Document):
 			group_by="item_code, warehouse",
 		)
 		for key in keys:
-			stock_fold_authority.invalidate(key.item_code, key.warehouse)
+			stock_engine_valuation.delete_engine_state(key.item_code, key.warehouse)
 
 	def before_save(self):
 		self.set_expiry_date()

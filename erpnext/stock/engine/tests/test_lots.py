@@ -1,18 +1,27 @@
 """Lot sub-states: serial and batch valuation as the same fold at finer granularity."""
+
 from __future__ import annotations
 
-import unittest
-
 import math
+import unittest
 
 from hypothesis import given
 from hypothesis import strategies as st
 
-from erpnext.stock.engine import Allocation, Event, EventKind, Fifo, FoldContext, LotType, MovingAverage, replay
+from erpnext.stock.engine import (
+	Allocation,
+	EngineContext,
+	Event,
+	EventKind,
+	Fifo,
+	LotType,
+	MovingAverage,
+	replay,
+)
 from erpnext.stock.engine.tests.factories import at, issue, lot_issue, lot_receipt, receipt
 
-FIFO = FoldContext(policy=Fifo())
-FALLBACK = FoldContext(policy=Fifo(), fallback_rate=10)
+FIFO = EngineContext(policy=Fifo())
+FALLBACK = EngineContext(policy=Fifo(), fallback_rate=10)
 
 
 class TestSerial(unittest.TestCase):
@@ -72,14 +81,22 @@ class TestBatch(unittest.TestCase):
 	def test_allocations_may_cover_part_of_qty_change_but_never_exceed_it(self) -> None:
 		template = lot_receipt(1, 0, LotType.BATCH, [("B1", 5, 10)])
 		partial = Event(
-			1, template.posting_datetime, template.kind,
-			qty_change=99, declared_rate=10, allocations=template.allocations,
+			1,
+			template.posting_datetime,
+			template.kind,
+			qty_change=99,
+			declared_rate=10,
+			allocations=template.allocations,
 		)
 		assert partial.qty_change == 99  # remainder is unlotted pool stock
 		with self.assertRaises(ValueError):
 			Event(
-				1, template.posting_datetime, template.kind,
-				qty_change=2, declared_rate=10, allocations=template.allocations,
+				1,
+				template.posting_datetime,
+				template.kind,
+				qty_change=2,
+				declared_rate=10,
+				allocations=template.allocations,
 			)
 
 
@@ -137,7 +154,7 @@ class TestQuantityTagBatches(unittest.TestCase):
 	share reaches the engine unallocated and folds against the shared pool.
 	The pools never borrow from each other."""
 
-	MA = FoldContext(policy=MovingAverage())
+	MA = EngineContext(policy=MovingAverage())
 
 	def test_pools_close_at_exactly_zero_on_stock_out(self) -> None:
 		new = [("NEW", 10, 70.0)]
@@ -160,8 +177,9 @@ class TestQuantityTagBatches(unittest.TestCase):
 		events = [
 			receipt(1, 0, 10, 50),
 			lot_receipt(2, 10, LotType.BATCH, [("NEW", 10, 70.0)]),
-			Event(3, at(20), EventKind.ISSUE, qty_change=-4,
-				allocations=(Allocation(LotType.BATCH, "NEW", -2),)),
+			Event(
+				3, at(20), EventKind.ISSUE, qty_change=-4, allocations=(Allocation(LotType.BATCH, "NEW", -2),)
+			),
 		]
 		result = replay(events, self.MA)
 		assert _close(result.effects[3].consumed_rate, 60)  # 2@70 + 2@50
@@ -169,8 +187,14 @@ class TestQuantityTagBatches(unittest.TestCase):
 		assert _close(result.final.lot(LotType.BATCH, "NEW").qty, 8)
 
 	def test_partial_receipt_layers_remainder_into_pool(self) -> None:
-		event = Event(1, at(0), EventKind.RECEIPT, qty_change=5, declared_rate=70,
-			allocations=(Allocation(LotType.BATCH, "NEW", 2, 70.0),))
+		event = Event(
+			1,
+			at(0),
+			EventKind.RECEIPT,
+			qty_change=5,
+			declared_rate=70,
+			allocations=(Allocation(LotType.BATCH, "NEW", 2, 70.0),),
+		)
 		result = replay([event], self.MA)
 		assert _close(result.final.value, 5 * 70)
 		assert _close(result.final.lot(LotType.BATCH, "NEW").qty, 2)
@@ -178,18 +202,23 @@ class TestQuantityTagBatches(unittest.TestCase):
 
 	def test_allocations_beyond_qty_change_are_rejected(self) -> None:
 		with self.assertRaises(ValueError):
-			Event(1, at(0), EventKind.ISSUE, qty_change=-1,
-				allocations=(Allocation(LotType.BATCH, "B", -2),))
+			Event(1, at(0), EventKind.ISSUE, qty_change=-1, allocations=(Allocation(LotType.BATCH, "B", -2),))
 		with self.assertRaises(ValueError):
-			Event(1, at(0), EventKind.RECEIPT, qty_change=5, declared_rate=10,
-				allocations=(Allocation(LotType.BATCH, "B", -2),))
+			Event(
+				1,
+				at(0),
+				EventKind.RECEIPT,
+				qty_change=5,
+				declared_rate=10,
+				allocations=(Allocation(LotType.BATCH, "B", -2),),
+			)
 
 
 class TestBaselineAssertions(unittest.TestCase):
 	"""Cutover freeze: an assertion pins legacy's stored balance — lots seeded,
 	pool priced at assert_rate, negative balances frozen as exposure."""
 
-	MA = FoldContext(policy=MovingAverage())
+	MA = EngineContext(policy=MovingAverage())
 
 	def test_negative_assertion_freezes_exposure_settled_by_receipt(self) -> None:
 		events = [
@@ -204,7 +233,11 @@ class TestBaselineAssertions(unittest.TestCase):
 
 	def test_assertion_seeds_lots_and_prices_pool_at_assert_rate(self) -> None:
 		event = Event(
-			1, at(0), EventKind.ASSERTION, assert_qty=10, assert_rate=50,
+			1,
+			at(0),
+			EventKind.ASSERTION,
+			assert_qty=10,
+			assert_rate=50,
 			allocations=(Allocation(LotType.BATCH, "NEW", 4, 70.0),),
 		)
 		result = replay([event], self.MA)
@@ -214,12 +247,20 @@ class TestBaselineAssertions(unittest.TestCase):
 	def test_assertion_allocation_shape_is_validated(self) -> None:
 		with self.assertRaises(ValueError):
 			Event(
-				1, at(0), EventKind.ASSERTION, assert_qty=-1, assert_rate=10,
+				1,
+				at(0),
+				EventKind.ASSERTION,
+				assert_qty=-1,
+				assert_rate=10,
 				allocations=(Allocation(LotType.BATCH, "B", 1, 10.0),),
 			)
 		with self.assertRaises(ValueError):
 			Event(
-				1, at(0), EventKind.ASSERTION, assert_qty=3, assert_rate=10,
+				1,
+				at(0),
+				EventKind.ASSERTION,
+				assert_qty=3,
+				assert_rate=10,
 				allocations=(Allocation(LotType.BATCH, "B", 4, 10.0),),
 			)
 
@@ -228,14 +269,13 @@ class TestRateBuckets(unittest.TestCase):
 	"""Serial-wise valuation: an outward movement's rate_buckets consume the
 	matching receipt layers, so each picked unit leaves at its own rate."""
 
-	FIFO = FoldContext(policy=Fifo())
+	FIFO = EngineContext(policy=Fifo())
 
 	def test_picked_units_leave_at_their_own_rates(self) -> None:
 		events = [
 			receipt(1, 0, 100, 50),
 			receipt(2, 10, 100, 55),
-			Event(3, at(20), EventKind.ISSUE, qty_change=-10,
-				rate_buckets=((6, 50.0), (4, 55.0))),
+			Event(3, at(20), EventKind.ISSUE, qty_change=-10, rate_buckets=((6, 50.0), (4, 55.0))),
 		]
 		result = replay(events, self.FIFO)
 		assert _close(result.effects[3].value_delta, -(6 * 50 + 4 * 55))  # 520, not FIFO's 500
@@ -245,8 +285,7 @@ class TestRateBuckets(unittest.TestCase):
 	def test_unmatched_bucket_falls_back_to_policy(self) -> None:
 		events = [
 			receipt(1, 0, 10, 50),
-			Event(2, at(10), EventKind.ISSUE, qty_change=-4,
-				rate_buckets=((4, 99.0),)),  # no 99-layer exists
+			Event(2, at(10), EventKind.ISSUE, qty_change=-4, rate_buckets=((4, 99.0),)),  # no 99-layer exists
 		]
 		result = replay(events, self.FIFO)
 		assert _close(result.effects[2].value_delta, -200)  # policy consumed at 50
@@ -254,8 +293,7 @@ class TestRateBuckets(unittest.TestCase):
 
 	def test_bucket_shape_is_validated(self) -> None:
 		with self.assertRaises(ValueError):
-			Event(1, at(0), EventKind.RECEIPT, qty_change=5, declared_rate=10,
-				rate_buckets=((5, 10.0),))
+			Event(1, at(0), EventKind.RECEIPT, qty_change=5, declared_rate=10, rate_buckets=((5, 10.0),))
 		with self.assertRaises(ValueError):
 			Event(1, at(0), EventKind.ISSUE, qty_change=-2, rate_buckets=((3, 10.0),))
 

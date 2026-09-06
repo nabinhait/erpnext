@@ -138,13 +138,13 @@ class StockClosingEntry(Document):
 		if self.cancel_opening_adjustments():
 			# this closing was the frontier: reopening restates the year and
 			# slides the frontier one closing back
-			from erpnext.stock.doctype.stock_restatement.stock_restatement import start_for_closing
+			from erpnext.stock.doctype.stock_restatement.stock_restatement import start_for_cancelled_closing
 
-			start_for_closing(self)
+			start_for_cancelled_closing(self)
 
 	def cancel_opening_adjustments(self) -> bool:
 		"""Reopening the period takes its frontier adjustment with it: the
-		value delta is reversed and the baselines it owns stop locking."""
+		value delta is reversed and the opening_assertions it owns stop locking."""
 		adjustments = frappe.get_all(
 			"Stock Opening Adjustment", {"stock_closing_entry": self.name, "docstatus": 1}, pluck="name"
 		)
@@ -168,11 +168,11 @@ class StockClosingEntry(Document):
 			)
 
 	def remove_stock_closing(self):
-		from erpnext.stock.services import stock_fold_read
+		from erpnext.stock.services import stock_engine_snapshots
 
 		table = frappe.qb.DocType("Stock Closing Balance")
 		frappe.qb.from_(table).delete().where(table.stock_closing_entry == self.name).run()
-		stock_fold_read.delete_checkpoints(self.name)
+		stock_engine_snapshots.delete_snapshots(self.name)
 
 	@frappe.whitelist(methods=["POST"])
 	def enqueue_job(self):
@@ -221,14 +221,14 @@ class StockClosingEntry(Document):
 		self.create_fold_checkpoints()
 
 	def create_fold_checkpoints(self):
-		"""Checkpoint every active key's fold state at this closing, so reads
-		and refolds start here instead of the beginning of history."""
+		"""Snapshot every active key's engine state at this closing, so reads
+		and recomputes start here instead of the beginning of history."""
 		if not frappe.db.count("Stock Event", {"company": self.company}):
 			return
 
-		from erpnext.stock.services import stock_fold_read
+		from erpnext.stock.services import stock_engine_snapshots
 
-		stock_fold_read.create_checkpoints(self.company, self.to_date, closing_entry=self.name)
+		stock_engine_snapshots.create_snapshots(self.company, self.to_date, closing_entry=self.name)
 
 	def get_prepared_data(self):
 		if attachments := get_attachments(self.doctype, self.name):

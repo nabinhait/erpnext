@@ -1,17 +1,17 @@
 """Property-based tests — rung 1 of the testing ladder (design doc §2.14)."""
+
 from __future__ import annotations
 
-import unittest
-
 import math
+import unittest
 
 from hypothesis import given
 from hypothesis import strategies as st
 
-from erpnext.stock.engine import Fifo, FoldContext, MovingAverage, refold_after_insert, replay
+from erpnext.stock.engine import EngineContext, Fifo, MovingAverage, replay, replay_after_insert
 from erpnext.stock.engine.tests.factories import SPACING_MINUTES, assertion, build, receipt, reversal
 
-FIFO = FoldContext(policy=Fifo())
+FIFO = EngineContext(policy=Fifo())
 
 
 @st.composite
@@ -71,7 +71,7 @@ class TestPropertiesFunctions(unittest.TestCase):
 
 	@given(histories(allow_assertions=False))
 	def test_moving_average_matches_reference(self, ops) -> None:
-		result = replay(build(ops), FoldContext(policy=MovingAverage()))
+		result = replay(build(ops), EngineContext(policy=MovingAverage()))
 		qty = value = 0.0
 		for op in ops:
 			if op[0] == "receipt":
@@ -90,7 +90,7 @@ class TestPropertiesFunctions(unittest.TestCase):
 		assert resumed.final == full.final
 
 	@given(histories(min_size=2), st.data())
-	def test_incremental_refold_equals_full_refold(self, ops, data) -> None:
+	def test_incremental_recompute_equals_full_recompute(self, ops, data) -> None:
 		"""Convergence detection never stops early wrongly."""
 		events = build(ops)
 		prior = replay(events, FIFO)
@@ -98,7 +98,7 @@ class TestPropertiesFunctions(unittest.TestCase):
 		qty, rate = data.draw(st.integers(1, 100)), data.draw(st.integers(1, 50))
 		inserted = receipt(9999, slot * SPACING_MINUTES + 5, qty, rate)
 		events.append(inserted)
-		incremental = refold_after_insert(events, inserted, prior, FIFO)
+		incremental = replay_after_insert(events, inserted, prior, FIFO)
 		full = replay(events, FIFO)
 		merged = {**prior.states, **incremental.states}
 		for event in events:
@@ -107,7 +107,8 @@ class TestPropertiesFunctions(unittest.TestCase):
 	@given(histories(), histories(), st.integers(0, 100), st.integers(1, 50), st.data())
 	def test_assertion_erases_path_dependence(self, ops_a, ops_b, assert_qty, assert_rate, data) -> None:
 		suffix = data.draw(
-			histories(min_size=0, max_size=10, initial_held=assert_qty, allow_assertions=False))
+			histories(min_size=0, max_size=10, initial_held=assert_qty, allow_assertions=False)
+		)
 
 		def run(prefix_ops: list) -> object:
 			events = build(prefix_ops)
@@ -127,16 +128,19 @@ class TestPropertiesFunctions(unittest.TestCase):
 		events.append(reversal(next_id + 1, minute + 1, reverses=next_id, qty_change=-qty))
 		assert replay(events, FIFO).final == before
 
-	@given(st.lists(
-		st.one_of(
-			st.tuples(st.just("receipt"), st.integers(1, 50), st.integers(1, 30)),
-			st.tuples(st.just("issue"), st.integers(1, 80)),
-		),
-		min_size=1, max_size=25,
-	))
+	@given(
+		st.lists(
+			st.one_of(
+				st.tuples(st.just("receipt"), st.integers(1, 50), st.integers(1, 30)),
+				st.tuples(st.just("issue"), st.integers(1, 80)),
+			),
+			min_size=1,
+			max_size=25,
+		)
+	)
 	def test_fold_is_total_and_conserves_qty(self, ops) -> None:
 		"""Issues may exceed held stock; the fold never raises and qty stays conserved."""
-		result = replay(build(ops), FoldContext(policy=Fifo(), fallback_rate=7))
+		result = replay(build(ops), EngineContext(policy=Fifo(), fallback_rate=7))
 		net = sum(op[1] if op[0] == "receipt" else -op[1] for op in ops)
 		assert close(result.final.qty, net)
 

@@ -10,7 +10,7 @@ from erpnext.stock import get_warehouse_account_map
 from erpnext.stock.doctype.item.test_item import make_item
 from erpnext.stock.doctype.stock_entry.stock_entry_utils import make_stock_entry
 from erpnext.stock.services import stock_ledger_writer
-from erpnext.stock.services.stock_fold_authority import _latest_baseline
+from erpnext.stock.services.stock_engine_valuation import get_latest_opening_assertion_datetime
 from erpnext.tests.utils import ERPNextTestSuite
 
 COMPANY = "_Test Opening Adjustment Company"
@@ -24,7 +24,7 @@ class TestStockOpeningAdjustment(ERPNextTestSuite):
 		adjustment lists the key, books exactly the difference against the
 		adjustment account on the first open day, pins the key at engine
 		values so the fold continues from there, and is cancelled — books
-		reversed, baseline revoked — only through its closing entry."""
+		reversed, opening_assertion revoked — only through its closing entry."""
 		company = make_company(COMPANY, ABBREVIATION)
 		warehouse = make_warehouse("Opening Adjustment WH", company)
 		item = make_item(properties={"is_stock_item": 1, "valuation_method": "Moving Average"}).name
@@ -48,7 +48,7 @@ class TestStockOpeningAdjustment(ERPNextTestSuite):
 			adjustment = frappe.get_doc(
 				doctype="Stock Opening Adjustment", company=company, stock_closing_entry=closing.name
 			).insert()
-			adjustment.build()
+			adjustment.compute_differences()
 
 			self.assertEqual(adjustment.status, "Ready")
 			self.assertEqual(adjustment.keys, 1)
@@ -62,17 +62,17 @@ class TestStockOpeningAdjustment(ERPNextTestSuite):
 			adjustment.submit()
 			self._assert_gl_delta(adjustment, warehouse, -37)
 			self.assertAlmostEqual(_bin_value(key), 600, places=2)
-			baseline = frappe.db.get_value(
+			opening_assertion = frappe.db.get_value(
 				"Stock Event",
 				{**key, "source": "Baseline", "voucher_no": adjustment.name},
 				["assert_qty", "assert_rate", "voucher_type"],
 				as_dict=True,
 			)
-			self.assertEqual(baseline.voucher_type, "Stock Opening Adjustment")
-			self.assertEqual(flt(baseline.assert_qty), 6)
-			self.assertAlmostEqual(flt(baseline.assert_rate), 100, places=4)
+			self.assertEqual(opening_assertion.voucher_type, "Stock Opening Adjustment")
+			self.assertEqual(flt(opening_assertion.assert_qty), 6)
+			self.assertAlmostEqual(flt(opening_assertion.assert_rate), 100, places=4)
 
-			frappe.conf.stock_fold_authoritative = 1
+			frappe.conf.stock_engine_valuation = 1
 			issue = make_stock_entry(item_code=item, source=warehouse, qty=1, company=company)
 			sle = frappe.db.get_value(
 				"Stock Ledger Entry",
@@ -89,14 +89,14 @@ class TestStockOpeningAdjustment(ERPNextTestSuite):
 			closing.reload()
 			closing.cancel()
 		finally:
-			frappe.conf.pop("stock_fold_authoritative", None)
+			frappe.conf.pop("stock_engine_valuation", None)
 			frappe.conf.pop("stock_event_dual_write", None)
 
 		adjustment.reload()
 		self.assertEqual(adjustment.docstatus, 2)
 		self.assertEqual(adjustment.status, "Cancelled")
 		self._assert_gl_delta(adjustment, warehouse, 0)
-		self.assertIsNone(_latest_baseline(key))
+		self.assertIsNone(get_latest_opening_assertion_datetime(key))
 
 	def test_threshold_gates_auto_submit(self):
 		"""within_threshold is the migration's go/no-go: set only when a
@@ -119,7 +119,7 @@ class TestStockOpeningAdjustment(ERPNextTestSuite):
 
 			for threshold, expected in ((0, 0), (5, 0), (10, 1)):
 				frappe.db.set_single_value("Stock Settings", "opening_adjustment_threshold", threshold)
-				adjustment.build()
+				adjustment.compute_differences()
 				self.assertAlmostEqual(adjustment.total_delta, -8, places=2)
 				self.assertEqual(adjustment.within_threshold, expected, msg=f"threshold {threshold}")
 		finally:

@@ -134,9 +134,9 @@ class TestStockClosingEntryDuplicate(ERPNextTestSuite):
 
 class TestScheduledFoldCheckpoints(ERPNextTestSuite):
 	def test_scheduled_checkpoints_need_no_closing_entry(self):
-		"""The monthly job cuts silent checkpoints — a performance artifact with
+		"""The monthly job cuts silent snapshots — a performance artifact with
 		no closing entry and no locking power — and reruns create nothing new."""
-		from erpnext.stock.services import stock_fold_read
+		from erpnext.stock.services import stock_engine_snapshots
 
 		item = make_item(properties={"is_stock_item": 1}).name
 		frappe.conf.stock_event_dual_write = 1
@@ -146,17 +146,17 @@ class TestScheduledFoldCheckpoints(ERPNextTestSuite):
 			frappe.conf.pop("stock_event_dual_write", None)
 
 		filters = {"item_code": item, "warehouse": WAREHOUSE}
-		created = stock_fold_read.create_checkpoints(COMPANY, nowdate())
+		created = stock_engine_snapshots.create_snapshots(COMPANY, nowdate())
 		self.assertGreaterEqual(created, 1)
-		checkpoint = frappe.db.get_value(
-			"Stock Fold Checkpoint", filters, ["stock_closing_entry", "last_event"], as_dict=1
+		snapshot = frappe.db.get_value(
+			"Stock Engine Snapshot", filters, ["stock_closing_entry", "last_event"], as_dict=1
 		)
-		self.assertFalse(checkpoint.stock_closing_entry)
-		self.assertTrue(checkpoint.last_event)
+		self.assertFalse(snapshot.stock_closing_entry)
+		self.assertTrue(snapshot.last_event)
 
-		self.assertEqual(stock_fold_read.create_checkpoints(COMPANY, nowdate()), 0)
-		self.assertEqual(frappe.db.count("Stock Fold Checkpoint", filters), 1)
+		self.assertEqual(stock_engine_snapshots.create_snapshots(COMPANY, nowdate()), 0)
+		self.assertEqual(frappe.db.count("Stock Engine Snapshot", filters), 1)
 		# the monthly wrapper (last month's end) is safe to run and creates
 		# nothing for keys whose activity is all newer
-		stock_fold_read.create_monthly_fold_checkpoints()
-		self.assertEqual(frappe.db.count("Stock Fold Checkpoint", filters), 1)
+		stock_engine_snapshots.create_monthly_snapshots()
+		self.assertEqual(frappe.db.count("Stock Engine Snapshot", filters), 1)

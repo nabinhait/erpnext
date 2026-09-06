@@ -55,7 +55,7 @@ class TestPurchaseReceiptTrends(ERPNextTestSuite):
 
 	def test_receipt_qty_in_trend(self):
 		# The report sums ALL purchase receipts for the item in the fiscal year, so capture
-		# any pre-existing baseline and assert only this receipt's contribution.
+		# any pre-existing opening_assertion and assert only this receipt's contribution.
 		cols = ["_Test Fiscal Year 2026 (Qty)", "_Test Fiscal Year 2026 (Amt)"]
 		before = self.values({"Item": ITEM}, cols)
 		make_purchase_receipt(
