@@ -4,7 +4,7 @@
 
 **Where everything is:**
 - **One program branch: `stock-ledger-redesign`** (origin = nabinhait/erpnext), tip `eea2cc91c1`
-  (queued refolds + Stock Restatement), rebased onto upstream develop (5beed5f4, Sep 5). frappe fast-forwarded
+  (review pass), rebased onto upstream develop (5beed5f4, Sep 5). frappe fast-forwarded
   to `b56649ed` (Sep 4) — required by new erpnext. Safety tag `pre-rebase-2026-09-05` = old tip.
   The old stock-ledger-cutover name and the M2–M4-only branch are gone (renamed/deleted).
 - **Engine is vendored**: `erpnext/stock/engine/` (63 frappe-runner tests incl. property suite;
@@ -47,6 +47,10 @@ closings manual locks.
 4. Refold queue hardening: per-key advisory lock in refold_key on postgres (sync appends and the
    job can interleave; MariaDB gap locks cover it today), a Desk list view / retry button for
    Failed rows.
+5. Review follow-ups (see 2026-09-06 review entry): one-off repair of stale `Stock Event.sle`
+   links on test2/apnaklub (rename fix is forward-only; old content hashes also differ now that
+   `sle` left HASH_FIELDS); bundle valuation + outgoing-rate write-back on the fold path
+   (APPENDED/QUEUED return before `update_entries_after`'s non-SLE side effects).
 6. **Lint debt**: pre-commit hangs → every commit used --no-verify; fix hook, re-lint branch.
 7. Upstream wave: write-guard logger → v16 PR; remaining migration/report fixes; #57980.
 8. Gameplan post — blocked on user running `frappectl auth login` in a real terminal.
@@ -921,4 +925,30 @@ dated ≤ to_date while Queued/In Progress. Tests: queued-vs-sync parity
 frontier + adjustment, drift of 37 restated, GL −37 on the restatement,
 old adjustment cancelled, unlock). Job exceptions re-raise under the test
 runner (a rollback there erases the sandbox).
+
+2026-09-06 — Review pass over the whole branch (842cf574 simplification
+after four cleanup agents; d21fa18ff3 correctness fixes after a high-effort
+code review; 2e143c1ba1 naming). Ten verified defects fixed, each reproduced
+first: hourly SLE rename orphaned Stock Event.sle links (rename_row now
+carries them; `sle` dropped from HASH_FIELDS); no quantity tolerance in
+the engine (QTY_EPSILON snapping — FIFO 0.7+0.1−0.8 tripped the state
+assertion); landed cost dropped on earlier receipts under Moving
+Average (merged-layer policies uplift the whole pool); hard deletes left
+fold state/checkpoints alive (writer invalidates; emitter removes
+orphaned allocations); a backdated reco anchored the window at itself
+and was never projected; LCV cancel re-decided fold-vs-legacy from live
+state (cancel now follows the submit path; zero-total guard);
+Item.allow_negative_stock ignored by the fold; company allowlist not
+applied to revaluations; write_valuation invalidated only with
+authority on; backfill serial allocations lacked declared_rate. Also:
+completeness check counts events joined to live SLEs, QUEUED path
+invalidates the tip state, queued rows widened/claimed by restatements
+and stale In Progress rows re-queued, opening adjustment re-photographs
+its closing after the baselines, mid-job commits removed from the
+flushers. Duplication collapsed into stock_engine_bridge (EVENT_FIELDS,
+events_from_rows, allocations_by_event, bundle_backed_sles,
+is_baseline); equivalent_value deleted. Battery: engine 63, authority
+13, read 5, refold 1, event 2, closing 7, opening adjustment 2,
+restatement 1, landed cost voucher 27 — all green (three errors seen
+once came from two test runs overlapping on the site).
 
