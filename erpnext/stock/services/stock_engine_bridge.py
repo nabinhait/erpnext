@@ -121,13 +121,70 @@ def end_of_day(date) -> str:
 	return f"{date} 23:59:59.999999"
 
 
-def equivalent_value(state) -> float:
-	"""The engine state's value in legacy terms. The engine already nets a
-	negative balance's exposure (qty x provisional rate) out of ``value``,
-	exactly the negative stock value legacy carries — so this is the value
-	itself; the helper exists so no caller subtracts the exposure a second
-	time."""
-	return state.value
+EVENT_FIELDS = (
+	"name",
+	"item_code",
+	"warehouse",
+	"posting_datetime",
+	"kind",
+	"qty_change",
+	"declared_rate",
+	"assert_qty",
+	"assert_rate",
+	"reverses_event",
+	"value_change",
+	"sle",
+	"voucher_type",
+	"voucher_no",
+)
+
+
+def events_from_rows(eng: frappe._dict, rows: list[frappe._dict]) -> list:
+	"""Engine events for Stock Event rows, in the given order.
+
+	Lot allocations reach the engine only for bundle-backed ledger rows and
+	cutover baselines; field-derived lot facts on pre-bundle rows were valued
+	aggregate by legacy and stay that way."""
+	bundle_rows = bundle_backed_sles({row.sle for row in rows if row.sle})
+	allocations = allocations_by_event([row.name for row in rows])
+	return [
+		to_event(
+			eng, row, allocations.get(str(row.name)) if row.sle in bundle_rows or is_baseline(row) else None
+		)
+		for row in rows
+	]
+
+
+def is_baseline(row: frappe._dict) -> bool:
+	"""An SLE-less assertion is a cutover baseline; its allocations seed lots."""
+	return row.kind == "Assertion" and not row.sle
+
+
+def allocations_by_event(event_names: list) -> dict[str, list[frappe._dict]]:
+	if not event_names:
+		return {}
+	rows = frappe.get_all(
+		"Stock Event Allocation",
+		filters={"parent": ("in", [str(name) for name in event_names])},
+		fields=["parent", "serial_no", "batch_no", "qty_change", "declared_rate"],
+		order_by="idx",
+	)
+	grouped: dict[str, list[frappe._dict]] = {}
+	for row in rows:
+		grouped.setdefault(str(row.parent), []).append(row)
+	return grouped
+
+
+def bundle_backed_sles(sle_names: set) -> set[str]:
+	if not sle_names:
+		return set()
+	return set(
+		frappe.get_all(
+			"Stock Ledger Entry",
+			filters={"name": ("in", list(sle_names)), "serial_and_batch_bundle": ("is", "set")},
+			pluck="name",
+		)
+	)
 
 
 def serialize_state(state) -> dict:

@@ -26,6 +26,8 @@ from collections.abc import Iterable
 import frappe
 from frappe.utils import flt
 
+from erpnext.stock.services import stock_event_emitter
+
 EVENT_FIELDS = (
 	"name",
 	"item_code",
@@ -41,21 +43,6 @@ EVENT_FIELDS = (
 	"voucher_type",
 	"voucher_no",
 	"source",
-	"creation",
-	"modified",
-	"owner",
-	"modified_by",
-)
-ALLOCATION_FIELDS = (
-	"name",
-	"parent",
-	"parenttype",
-	"parentfield",
-	"idx",
-	"serial_no",
-	"batch_no",
-	"qty_change",
-	"declared_rate",
 	"creation",
 	"modified",
 	"owner",
@@ -211,9 +198,8 @@ def _engine_truth(engine, state) -> dict:
 	baseline asserts, and the batch sub-states it seeds. Seeds are dropped
 	when the key is negative or the lots overshoot the balance — an assertion
 	cannot carry them then."""
-	from erpnext.stock.services import stock_engine_bridge
 
-	qty, value = flt(state.qty), stock_engine_bridge.equivalent_value(state)
+	qty, value = flt(state.qty), state.value
 	seeds = [
 		frappe._dict(batch_no=lot.lot_id, qty=lot.state.qty, rate=lot.state.valuation_rate)
 		for lot in state.lots
@@ -323,10 +309,8 @@ def _flush(events: list[list], allocations: list[list]) -> None:
 		frappe.db.bulk_insert("Stock Event", EVENT_FIELDS, events)
 		events.clear()
 	if allocations:
-		frappe.db.bulk_insert("Stock Event Allocation", ALLOCATION_FIELDS, allocations)
+		frappe.db.bulk_insert("Stock Event Allocation", stock_event_emitter.ALLOCATION_FIELDS, allocations)
 		allocations.clear()
-	if not frappe.in_test:
-		frappe.db.commit()
 
 
 def invalidate_fold_state(company: str) -> None:

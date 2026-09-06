@@ -16,7 +16,7 @@ import traceback
 
 import frappe
 from frappe.model.document import Document
-from frappe.utils import nowdate
+from frappe.utils import add_to_date, now_datetime, nowdate
 from frappe.utils.background_jobs import enqueue
 
 JOB_ID = "stock_refold_queue"
@@ -86,8 +86,7 @@ def enqueue_refold(
 		as_dict=True,
 	)
 	if pending:
-		if str(from_datetime) < str(pending.from_datetime):
-			frappe.db.set_value("Stock Refold", pending.name, "from_datetime", str(from_datetime))
+		_widen(pending, from_datetime, restatement)
 		return pending.name
 
 	row = frappe.get_doc(
@@ -109,11 +108,16 @@ def enqueue_refolds(keys: list[frappe._dict], company: str, from_datetime: str, 
 	"""Bulk form for a restatement: one row per key not already queued, all
 	carrying the restatement as the voucher the corrections ride on."""
 	pending = {
-		(row.item_code, row.warehouse)
+		(row.item_code, row.warehouse): row
 		for row in frappe.get_all(
-			"Stock Refold", {"company": company, "status": "Queued"}, ["item_code", "warehouse"]
+			"Stock Refold",
+			{"company": company, "status": "Queued"},
+			["name", "item_code", "warehouse", "from_datetime"],
 		)
 	}
+	for key in keys:
+		if (key.item_code, key.warehouse) in pending:
+			_widen(pending[(key.item_code, key.warehouse)], from_datetime, restatement)
 	timestamp = frappe.utils.now()
 	rows = [
 		[
@@ -138,6 +142,18 @@ def enqueue_refolds(keys: list[frappe._dict], company: str, from_datetime: str, 
 		frappe.db.bulk_insert("Stock Refold", BULK_FIELDS, rows[start : start + BULK_CHUNK])
 
 
+def _widen(pending: frappe._dict, from_datetime, restatement: str | None) -> None:
+	"""An earlier instant widens the pending row; a restatement claims it so
+	the corrections ride on the restatement and its completion counts the key."""
+	values = {}
+	if str(from_datetime) < str(pending.from_datetime):
+		values["from_datetime"] = str(from_datetime)
+	if restatement:
+		values.update(stock_restatement=restatement, voucher_type="Stock Restatement", voucher_no=restatement)
+	if values:
+		frappe.db.set_value("Stock Refold", pending.name, values)
+
+
 def kick() -> None:
 	enqueue(process_refold_queue, queue="long", timeout=3600, job_id=JOB_ID, deduplicate=True)
 
@@ -150,6 +166,7 @@ def process_refold_queue(restatement: str | None = None) -> dict:
 	started = time.monotonic()
 	report = {"completed": 0, "failed": 0}
 	restatements = set()
+	_requeue_stale()
 	while time.monotonic() - started < TIME_BUDGET:
 		row = _next_queued(restatement)
 		if not row:
@@ -163,6 +180,15 @@ def process_refold_queue(restatement: str | None = None) -> dict:
 	if _next_queued(restatement):
 		kick()
 	return report
+
+
+def _requeue_stale() -> None:
+	"""A worker killed mid-refold leaves its row In Progress with nothing to
+	reset it; hand it back to the queue once the budget has clearly lapsed."""
+	stale_before = add_to_date(now_datetime(), seconds=-2 * TIME_BUDGET)
+	frappe.db.set_value(
+		"Stock Refold", {"status": "In Progress", "modified": ("<", stale_before)}, "status", "Queued"
+	)
 
 
 def _next_queued(restatement: str | None) -> frappe._dict | None:

@@ -75,7 +75,7 @@ def run(
 		if legacy_broken:
 			report["class_a_keys"].append((item_code, warehouse))
 
-		allocations = _allocations_by_event([row.name for row in rows])
+		allocations = stock_engine_bridge.allocations_by_event([row.name for row in rows])
 		try:
 			events = [
 				stock_engine_bridge.to_event(
@@ -149,7 +149,7 @@ def run(
 			if effect is None or stored is None:
 				continue
 
-			shadow_value = stock_engine_bridge.equivalent_value(result.states[cint(row.name)])
+			shadow_value = result.states[cint(row.name)].value
 			qty_delta = abs(effect.qty_after - flt(stored.qty_after_transaction))
 			value_delta = abs(shadow_value - flt(stored.stock_value))
 
@@ -234,7 +234,7 @@ def _match_hybrid(rows, agg_result, lot_result, legacy, value_tolerance):
 		stored = legacy.get(row.sle)
 		if stored is None:
 			continue
-		agg_value = stock_engine_bridge.equivalent_value(agg_result.states[cint(row.name)])
+		agg_value = agg_result.states[cint(row.name)].value
 		if abs(agg_value - flt(stored.stock_value)) > band:
 			boundary = index
 			break
@@ -247,15 +247,13 @@ def _match_hybrid(rows, agg_result, lot_result, legacy, value_tolerance):
 	)
 	if previous is None:
 		return None
-	offset = flt(previous.stock_value) - stock_engine_bridge.equivalent_value(
-		lot_result.states[cint(rows[boundary - 1].name)]
-	)
+	offset = flt(previous.stock_value) - lot_result.states[cint(rows[boundary - 1].name)].value
 
 	for row in rows[boundary:]:
 		stored = legacy.get(row.sle)
 		if stored is None:
 			continue
-		lot_value = stock_engine_bridge.equivalent_value(lot_result.states[cint(row.name)])
+		lot_value = lot_result.states[cint(row.name)].value
 		if row.kind == "Assertion":
 			# a reconciliation snaps the stored balance to the count, resetting
 			# the seeded gap — recalibrate here and nowhere else
@@ -276,22 +274,9 @@ def _has_misfits(rows, result, legacy, qty_tolerance, value_tolerance) -> bool:
 		state = result.states[cint(row.name)]
 		if abs(effect.qty_after - flt(stored.qty_after_transaction)) > qty_tolerance * 1000:
 			return True
-		if abs(stock_engine_bridge.equivalent_value(state) - flt(stored.stock_value)) > value_tolerance * 10:
+		if abs(state.value - flt(stored.stock_value)) > value_tolerance * 10:
 			return True
 	return False
-
-
-def _allocations_by_event(event_names: list) -> dict[str, list[frappe._dict]]:
-	rows = frappe.get_all(
-		"Stock Event Allocation",
-		filters={"parent": ("in", [str(name) for name in event_names])},
-		fields=["parent", "serial_no", "batch_no", "qty_change", "declared_rate"],
-		order_by="idx",
-	)
-	grouped: dict[str, list[frappe._dict]] = {}
-	for row in rows:
-		grouped.setdefault(str(row.parent), []).append(row)
-	return grouped
 
 
 def _legacy_rows(sle_names: list[str]) -> dict[str, frappe._dict]:
@@ -333,7 +318,7 @@ def diagnose(item_code: str, warehouse: str, limit: int = 12) -> list[dict]:
 	engine = stock_engine_bridge.engine()
 	policy = stock_engine_bridge.policy_for(item_code, engine)
 	rows = _event_rows(item_code, warehouse)
-	allocations = _allocations_by_event([row.name for row in rows])
+	allocations = stock_engine_bridge.allocations_by_event([row.name for row in rows])
 	events = [
 		stock_engine_bridge.to_event(engine, row, allocations.get(str(row.name)), honor_batch_flag=False)
 		for row in rows
@@ -365,9 +350,7 @@ def diagnose(item_code: str, warehouse: str, limit: int = 12) -> list[dict]:
 		effect = result.effects.get(cint(row.name))
 		if not stored or not effect:
 			continue
-		delta = abs(
-			stock_engine_bridge.equivalent_value(result.states[cint(row.name)]) - flt(stored.stock_value)
-		)
+		delta = abs(result.states[cint(row.name)].value - flt(stored.stock_value))
 		if not diverged and delta <= 0.05:
 			continue
 		diverged = True

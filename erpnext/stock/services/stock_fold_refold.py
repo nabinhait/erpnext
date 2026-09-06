@@ -18,8 +18,6 @@ triggering voucher, dated at each affected voucher's own posting date inside
 the open period.
 """
 
-import json
-
 import frappe
 from frappe.utils import cint, flt
 
@@ -89,7 +87,7 @@ def _value_now_queue_rest(engine, policy, event_row, args: dict, allow_negative_
 	state = stock_fold_read.state_before(engine, event_row)
 	allocations = None
 	if args.get("serial_and_batch_bundle"):
-		allocations = authority._allocations([event_row.name]).get(str(event_row.name))
+		allocations = stock_engine_bridge.allocations_by_event([event_row.name]).get(str(event_row.name))
 	try:
 		event = stock_engine_bridge.to_event(engine, event_row, allocations)
 	except ValueError:
@@ -101,6 +99,9 @@ def _value_now_queue_rest(engine, policy, event_row, args: dict, allow_negative_
 	authority._project_sle(
 		event_row.sle, result.final, effect.qty_after, effect.value_after, effect.value_delta, policy, engine
 	)
+	# the stored state predates this row; until the queue refolds the key,
+	# later submits must not append onto it
+	authority.invalidate(event_row.item_code, event_row.warehouse, event_row.posting_datetime)
 	enqueue_refold(
 		event_row.item_code,
 		event_row.warehouse,
@@ -122,21 +123,7 @@ def _rows_since(key: dict, baseline: str | None) -> list[frappe._dict]:
 		frappe.get_all(
 			"Stock Event",
 			filters=filters,
-			fields=[
-				"name",
-				"item_code",
-				"posting_datetime",
-				"kind",
-				"qty_change",
-				"declared_rate",
-				"assert_qty",
-				"assert_rate",
-				"reverses_event",
-				"value_change",
-				"sle",
-				"voucher_type",
-				"voucher_no",
-			],
+			fields=stock_engine_bridge.EVENT_FIELDS,
 			order_by="posting_datetime, name",
 		)
 	)
@@ -163,22 +150,12 @@ def _refold_rows(
 	is_tail = window[1] == len(rows)
 	rows = rows[window[0] : window[1]]
 	# a boundary assertion reconstructs the state but its own stored values are
-	# untouched by the change — never re-project it
-	changed_rows = rows[1:] if window[0] > 0 else rows
+	# untouched by the change — never re-project it, unless it is the row being inserted
+	inserted_boundary = window[0] > 0 and cint(rows[0].name) == validate_event_id
+	changed_rows = rows if window[0] == 0 or inserted_boundary else rows[1:]
 
-	bundle_rows = authority._bundle_backed_sles(key)
-	allocations = authority._allocations([row.name for row in rows])
 	try:
-		events = [
-			stock_engine_bridge.to_event(
-				engine,
-				row,
-				allocations.get(str(row.name))
-				if row.sle in bundle_rows or authority._is_baseline(row)
-				else None,
-			)
-			for row in rows
-		]
+		events = stock_engine_bridge.events_from_rows(engine, rows)
 	except ValueError:
 		return None
 
@@ -187,9 +164,12 @@ def _refold_rows(
 		authority._validate_negative(result.effects[validate_event_id], args, allow_negative_stock)
 
 	live = _live_rows(key, changed_rows)
-	start_value = 0.0
-	if window[0] > 0:
-		start_value = stock_engine_bridge.equivalent_value(result.states[cint(rows[0].name)])
+	if inserted_boundary:
+		start_value = _stored_value_before(key, anchor[0])
+	elif window[0] > 0:
+		start_value = result.states[cint(rows[0].name)].value
+	else:
+		start_value = 0.0
 	projections = _absorbed_projections(changed_rows, result, start_value)
 	for sle_name, projection in projections.items():
 		if sle_name in live:
@@ -225,6 +205,18 @@ def _correct_gl(args: dict, key: dict, instant: str, projections: dict, live: di
 			_post_gl_adjustment(args, key, projections, live)
 	elif frappe.conf.get(authority.SUPPRESS_FLAG):
 		_regenerate_gl(args, instant, live.values())
+
+
+def _stored_value_before(key: dict, instant: str) -> float:
+	"""Legacy's stock value just before the instant — what an inserted
+	reconciliation's own value difference is measured from."""
+	value = frappe.db.get_value(
+		"Stock Ledger Entry",
+		{**key, "is_cancelled": 0, "posting_datetime": ("<", instant)},
+		"stock_value",
+		order_by="posting_datetime desc, creation desc",
+	)
+	return flt(value)
 
 
 def _live_rows(key: dict, changed_rows: list) -> dict:
@@ -305,7 +297,7 @@ def _absorbed_projections(rows: list, result, start_value: float) -> dict:
 	index, total = 0, len(rows)
 
 	while index < total and not rows[index].sle:
-		prev_value = stock_engine_bridge.equivalent_value(result.states[cint(rows[index].name)])
+		prev_value = result.states[cint(rows[index].name)].value
 		index += 1
 
 	while index < total:
@@ -314,7 +306,7 @@ def _absorbed_projections(rows: list, result, start_value: float) -> dict:
 		while tail + 1 < total and not rows[tail + 1].sle:
 			tail += 1
 		state = result.states[cint(rows[tail].name)]
-		value = stock_engine_bridge.equivalent_value(state)
+		value = state.value
 		projections[row.sle] = {
 			"qty_after": result.effects[cint(row.name)].qty_after,
 			"value": value,

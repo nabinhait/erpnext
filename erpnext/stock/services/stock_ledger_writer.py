@@ -80,9 +80,9 @@ def write_valuation(sle: dict) -> None:
 	"""
 	frappe.get_doc(sle).db_update()
 
-	if frappe.conf.get("stock_fold_authoritative"):
-		from erpnext.stock.services import stock_fold_authority
+	from erpnext.stock.services import stock_fold_authority
 
+	if stock_fold_authority.tracks_state():
 		stock_fold_authority.invalidate(
 			sle.get("item_code"), sle.get("warehouse"), sle.get("posting_datetime")
 		)
@@ -141,6 +141,8 @@ def rename_row(oldname: str, newname: str) -> None:
 		.set(sle.modified, now())
 		.where(sle.name == oldname)
 	).run()
+	# events link their ledger row by name; carry the link across the rename
+	frappe.db.set_value("Stock Event", {"sle": oldname}, "sle", newname, update_modified=False)
 
 
 @authorized_writer
@@ -150,6 +152,7 @@ def delete_for_voucher(voucher_type: str, voucher_no: str) -> None:
 	Only reached from document deletion with Accounts Settings
 	``delete_linked_ledger_entries`` enabled; cancellation never deletes.
 	"""
+	_invalidate_fold_state({"voucher_type": voucher_type, "voucher_no": voucher_no})
 	sle = frappe.qb.DocType("Stock Ledger Entry")
 	frappe.qb.from_(sle).delete().where(
 		(sle.voucher_type == voucher_type) & (sle.voucher_no == voucher_no)
@@ -159,7 +162,24 @@ def delete_for_voucher(voucher_type: str, voucher_no: str) -> None:
 @authorized_writer
 def delete_rows(names: list[str]) -> None:
 	"""Hard-delete SLE rows by name (per-company transaction deletion job)."""
+	_invalidate_fold_state({"name": ("in", names)})
 	frappe.db.delete("Stock Ledger Entry", {"name": ("in", names)})
+
+
+def _invalidate_fold_state(filters: dict) -> None:
+	"""Memoised fold state must not outlive the ledger rows it was folded from."""
+	from erpnext.stock.services import stock_fold_authority
+
+	if not stock_fold_authority.tracks_state():
+		return
+	keys = frappe.get_all(
+		"Stock Ledger Entry",
+		filters=filters,
+		fields=["item_code", "warehouse"],
+		group_by="item_code, warehouse",
+	)
+	for key in keys:
+		stock_fold_authority.invalidate(key.item_code, key.warehouse)
 
 
 @authorized_writer

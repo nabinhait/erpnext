@@ -21,7 +21,7 @@ is the lock, the checkpoint is just the cache it leaves behind.
 import json
 
 import frappe
-from frappe.utils import cint, flt
+from frappe.utils import cint
 
 from erpnext.stock.services import stock_engine_bridge
 
@@ -119,7 +119,7 @@ def ledger_rows(item_code: str, warehouse: str, from_dt: str, to_dt: str) -> lis
 				"kind": event.kind.value,
 				"qty_change": event.qty_change,
 				"qty_after": effect.qty_after,
-				"value_after": stock_engine_bridge.equivalent_value(state),
+				"value_after": state.value,
 				"value_delta": effect.value_delta,
 				"valuation_rate": state.valuation_rate,
 			}
@@ -191,6 +191,13 @@ def create_checkpoints(company: str, to_date, closing_entry: str | None = None) 
 	return created
 
 
+def refresh_checkpoints(company: str, to_date, closing_entry: str) -> int:
+	"""Re-photograph a closing after facts were added at its instant (a
+	cutover baseline), so reads and refolds resume from the same history."""
+	delete_checkpoints(closing_entry)
+	return create_checkpoints(company, to_date, closing_entry=closing_entry)
+
+
 def delete_checkpoints(closing_entry_name: str) -> None:
 	frappe.db.delete("Stock Fold Checkpoint", {"stock_closing_entry": closing_entry_name})
 
@@ -221,8 +228,6 @@ def _flush_checkpoints(buffer: list[dict]) -> None:
 	values = [[({**row, **audit}).get(field) for field in fields] for row in buffer]
 	frappe.db.bulk_insert("Stock Fold Checkpoint", fields, values)
 	buffer.clear()
-	if not frappe.in_test:
-		frappe.db.commit()
 
 
 def _nearest_checkpoint(item_code: str, warehouse: str, as_of: str):
@@ -295,21 +300,7 @@ def _events(
 	rows = frappe.get_all(
 		"Stock Event",
 		filters=filters,
-		fields=[
-			"name",
-			"item_code",
-			"posting_datetime",
-			"kind",
-			"qty_change",
-			"declared_rate",
-			"assert_qty",
-			"assert_rate",
-			"reverses_event",
-			"value_change",
-			"sle",
-			"voucher_type",
-			"voucher_no",
-		],
+		fields=stock_engine_bridge.EVENT_FIELDS,
 		order_by="posting_datetime, name",
 	)
 	if after:
@@ -319,47 +310,4 @@ def _events(
 
 	from erpnext.stock.services.stock_fold_authority import _drop_revoked_baselines
 
-	rows = _drop_revoked_baselines(rows)
-
-	bundle_backed = _bundle_backed({row.sle for row in rows if row.sle})
-	allocations = _allocations([row.name for row in rows])
-	return [
-		stock_engine_bridge.to_event(
-			engine,
-			row,
-			allocations.get(str(row.name)) if row.sle in bundle_backed or _is_baseline(row) else None,
-		)
-		for row in rows
-	]
-
-
-def _is_baseline(row: frappe._dict) -> bool:
-	"""An SLE-less assertion is a cutover baseline; its allocations seed lots."""
-	return row.kind == "Assertion" and not row.sle
-
-
-def _bundle_backed(sle_names: set) -> set:
-	if not sle_names:
-		return set()
-	return set(
-		frappe.get_all(
-			"Stock Ledger Entry",
-			filters={"name": ("in", list(sle_names)), "serial_and_batch_bundle": ("is", "set")},
-			pluck="name",
-		)
-	)
-
-
-def _allocations(event_names: list) -> dict[str, list[frappe._dict]]:
-	if not event_names:
-		return {}
-	rows = frappe.get_all(
-		"Stock Event Allocation",
-		filters={"parent": ("in", [str(name) for name in event_names])},
-		fields=["parent", "serial_no", "batch_no", "qty_change", "declared_rate"],
-		order_by="idx",
-	)
-	grouped: dict[str, list[frappe._dict]] = {}
-	for row in rows:
-		grouped.setdefault(str(row.parent), []).append(row)
-	return grouped
+	return stock_engine_bridge.events_from_rows(engine, _drop_revoked_baselines(rows))

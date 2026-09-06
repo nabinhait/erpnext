@@ -14,7 +14,7 @@ idempotent, and resumable: rerunning skips SLEs that already have an event
 """
 
 import frappe
-from frappe.utils import cint
+from frappe.utils import cint, flt
 
 from erpnext.stock.services import stock_event_emitter
 
@@ -80,13 +80,18 @@ def _bundle_entries(bundles: list[str | None]) -> dict[str, list[dict]]:
 	rows = frappe.get_all(
 		"Serial and Batch Entry",
 		filters={"parent": ("in", names)},
-		fields=["parent", "serial_no", "batch_no", "qty"],
+		fields=["parent", "serial_no", "batch_no", "qty", "incoming_rate"],
 		order_by="parent, idx",
 	)
 	grouped: dict[str, list[dict]] = {}
 	for row in rows:
 		grouped.setdefault(row.parent, []).append(
-			{"serial_no": row.serial_no, "batch_no": row.batch_no, "qty_change": row.qty}
+			{
+				"serial_no": row.serial_no,
+				"batch_no": row.batch_no,
+				"qty_change": row.qty,
+				"declared_rate": flt(row.incoming_rate),
+			}
 		)
 	return grouped
 
@@ -148,6 +153,7 @@ def _flush(buffer: list[dict]) -> int:
 					allocation.get("serial_no"),
 					allocation.get("batch_no"),
 					allocation.get("qty_change"),
+					allocation.get("declared_rate"),
 					timestamp,
 					timestamp,
 					"Administrator",
@@ -157,27 +163,13 @@ def _flush(buffer: list[dict]) -> int:
 
 	frappe.db.bulk_insert("Stock Event", BULK_FIELDS, values)
 	if allocation_values:
-		frappe.db.bulk_insert("Stock Event Allocation", ALLOCATION_FIELDS, allocation_values)
+		frappe.db.bulk_insert(
+			"Stock Event Allocation", stock_event_emitter.ALLOCATION_FIELDS, allocation_values
+		)
 
 	inserted = len(buffer)
 	buffer.clear()
 	return inserted
-
-
-ALLOCATION_FIELDS = (
-	"name",
-	"parent",
-	"parenttype",
-	"parentfield",
-	"idx",
-	"serial_no",
-	"batch_no",
-	"qty_change",
-	"creation",
-	"modified",
-	"owner",
-	"modified_by",
-)
 
 
 def verify(

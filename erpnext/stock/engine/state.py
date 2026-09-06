@@ -4,6 +4,7 @@ State memoises its aggregate (qty, value) per instance: the memo is derived from
 the frozen fields by one fixed arithmetic path, is excluded from equality and
 hashing, and therefore cannot drift or affect convergence detection.
 """
+
 from __future__ import annotations
 
 from bisect import bisect_left
@@ -13,6 +14,9 @@ from operator import attrgetter
 from .lots import LotType
 
 _SORT_KEY = attrgetter("sort_key")
+QTY_EPSILON = 1e-9
+"""Quantities closer to zero than this are zero: float dust from decimal arithmetic never
+survives as a phantom layer, lot or exposure."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,8 +46,7 @@ class State:
 	exposure_qty: float = 0.0
 	exposure_rate: float = 0.0
 	lots: tuple[LotState, ...] = ()
-	_totals: tuple[float, float] | None = field(
-		default=None, init=False, repr=False, compare=False)
+	_totals: tuple[float, float] | None = field(default=None, init=False, repr=False, compare=False)
 
 	@property
 	def qty(self) -> float:

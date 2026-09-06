@@ -3,17 +3,21 @@
 Policies see only layers and quantities. Negative-stock handling lives in the
 fold; consume() is never asked for more than the layers hold.
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from .state import Layer
+from .state import QTY_EPSILON, Layer
 
 Layers = tuple[Layer, ...]
 
 
 class ValuationPolicy(ABC):
 	"""Strategy interface shared by all four methods."""
+
+	merges_layers = False
+	"""True when receipts collapse into one layer, so no layer remembers its receipt."""
 
 	@abstractmethod
 	def receive(self, layers: Layers, qty: float, rate: float, event_id: int) -> tuple[Layers, float]:
@@ -41,7 +45,7 @@ class LayeredPolicy(ValuationPolicy):
 			take = min(need, head.qty)
 			cost += take * head.rate
 			need -= take
-			if head.qty > take:
+			if head.qty - take > QTY_EPSILON:
 				remaining.insert(index, Layer(head.qty - take, head.rate, head.source_event_id))
 		return tuple(remaining), cost
 
@@ -55,15 +59,20 @@ class Lifo(LayeredPolicy):
 
 
 class MergedLayerPolicy(ValuationPolicy):
-	"""Shared mechanics for policies that keep one merged layer."""
+	"""Shared mechanics for policies that keep one merged layer.
+
+	Consuming merges first, so a state folded under a layered policy (the item's
+	valuation method changed) is absorbed instead of rejected."""
+
+	merges_layers = True
 
 	def consume(self, layers: Layers, qty: float) -> tuple[Layers, float]:
-		(layer,) = layers
-		cost = qty * layer.rate
-		remaining = layer.qty - qty
-		if remaining <= 0:
-			return (), cost
-		return (Layer(remaining, layer.rate, layer.source_event_id),), cost
+		held = sum(layer.qty for layer in layers)
+		rate = sum(layer.value for layer in layers) / held
+		remaining = held - qty
+		if remaining <= QTY_EPSILON:
+			return (), qty * rate
+		return (Layer(remaining, rate, layers[-1].source_event_id),), qty * rate
 
 
 class MovingAverage(MergedLayerPolicy):

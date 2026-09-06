@@ -1,4 +1,5 @@
 """Immutable stock facts. Everything else in the engine is computed from these."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -109,7 +110,7 @@ def validate_allocations(event: Event) -> None:
 	else:
 		if abs(total) > abs(event.qty_change) + 1e-9:
 			raise ValueError("allocations cannot exceed qty_change")
-		if total * event.qty_change < 0:
+		if any(allocation.qty * event.qty_change < 0 for allocation in event.allocations):
 			raise ValueError("allocations must move in the event's direction")
 	keys = {(a.lot_type, a.lot_id) for a in event.allocations}
 	if len(keys) != len(event.allocations):

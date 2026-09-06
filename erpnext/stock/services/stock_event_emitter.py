@@ -31,7 +31,6 @@ HASH_FIELDS = (
 	"voucher_type",
 	"voucher_no",
 	"voucher_detail_no",
-	"sle",
 )
 
 
@@ -175,8 +174,12 @@ def content_hash(args: dict) -> str:
 
 
 def delete_for_voucher(voucher_type: str, voucher_no: str) -> None:
-	"""Remove a voucher's events when its ledger rows are hard-deleted."""
-	frappe.db.delete("Stock Event", {"voucher_type": voucher_type, "voucher_no": voucher_no})
+	"""Remove a voucher's events and their lot allocations when its ledger rows are hard-deleted."""
+	filters = {"voucher_type": voucher_type, "voucher_no": voucher_no}
+	names = frappe.get_all("Stock Event", filters=filters, pluck="name")
+	if names:
+		frappe.db.delete("Stock Event Allocation", {"parent": ("in", [str(name) for name in names])})
+		frappe.db.delete("Stock Event", filters)
 
 
 def _declared_rate(sle: "Document | dict") -> float:

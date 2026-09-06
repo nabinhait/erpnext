@@ -26,7 +26,7 @@ from frappe.model.document import Document
 from frappe.utils import add_days, cint, flt, get_link_to_form
 from frappe.utils.background_jobs import enqueue
 
-from erpnext.stock.services import stock_engine_bridge, stock_fold_cutover
+from erpnext.stock.services import stock_engine_bridge, stock_fold_cutover, stock_fold_read
 
 QTY_TOLERANCE = 1e-6
 
@@ -110,6 +110,11 @@ class StockOpeningAdjustment(Document):
 		rows = self.prepared_rows()
 		stock_fold_cutover.emit_baselines(
 			self.company, self.moment, (_baseline(row) for row in rows), owner=(self.doctype, self.name)
+		)
+		# the closing photographed the keys at this same instant, before the
+		# baselines existed; reads must resume from the pinned history too
+		stock_fold_read.refresh_checkpoints(
+			self.company, self.closing_entry().to_date, self.stock_closing_entry
 		)
 		self.post_gl_entries(rows)
 		self.shift_bins(rows, direction=1)

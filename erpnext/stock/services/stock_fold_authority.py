@@ -23,7 +23,8 @@ depends on the checkpoint: it is disposable tier-2 state.
 import json
 
 import frappe
-from frappe.utils import cint, flt
+from frappe.query_builder.functions import Count
+from frappe.utils import cint
 
 FLAG = "stock_fold_authoritative"
 COMPANIES_FLAG = "stock_fold_authoritative_companies"
@@ -33,6 +34,21 @@ APPENDED = "appended"
 REFOLDED = "refolded"
 QUEUED = "queued"
 LOT_CARDINALITY_GUARDRAIL = 5000
+
+
+def tracks_state() -> bool:
+	"""Whether fold state can exist on this site at all — dual write is the
+	master switch, so a legacy rewrite must invalidate even while authority
+	is switched off."""
+	return bool(frappe.conf.get("stock_event_dual_write"))
+
+
+def _enabled_for(company: str | None) -> bool:
+	"""Fold authority is on for the site and, when scoped, for this company."""
+	if not (frappe.conf.get(FLAG) and tracks_state()):
+		return False
+	companies = frappe.conf.get(COMPANIES_FLAG)
+	return not companies or company in companies
 
 
 def try_fold(args: dict, allow_negative_stock: bool = False) -> str | None:
@@ -96,7 +112,7 @@ def _try_fold(args: dict, allow_negative_stock: bool) -> str | None:
 
 	allocations = None
 	if args.get("serial_and_batch_bundle"):
-		allocations = _allocations([event_row.name]).get(str(event_row.name))
+		allocations = stock_engine_bridge.allocations_by_event([event_row.name]).get(str(event_row.name))
 	try:
 		event = stock_engine_bridge.to_event(engine, event_row, allocations)
 	except ValueError:
@@ -120,33 +136,13 @@ def _try_fold(args: dict, allow_negative_stock: bool) -> str | None:
 
 
 def _applies(args: dict) -> bool:
-	if not (frappe.conf.get(FLAG) and frappe.conf.get("stock_event_dual_write")):
-		return False
-
-	companies = frappe.conf.get(COMPANIES_FLAG)
-	if companies and args.get("company") not in companies:
-		return False
-
-	return not args.get("is_adjustment_entry")
+	return _enabled_for(args.get("company")) and not args.get("is_adjustment_entry")
 
 
 def _policy_for(engine, item_code: str):
 	from erpnext.stock.services import stock_engine_bridge
 
 	return stock_engine_bridge.policy_for(item_code, engine)
-
-
-def _allocations(event_names: list) -> dict[str, list[frappe._dict]]:
-	rows = frappe.get_all(
-		"Stock Event Allocation",
-		filters={"parent": ("in", [str(name) for name in event_names])},
-		fields=["parent", "serial_no", "batch_no", "qty_change", "declared_rate"],
-		order_by="idx",
-	)
-	grouped: dict[str, list[frappe._dict]] = {}
-	for row in rows:
-		grouped.setdefault(str(row.parent), []).append(row)
-	return grouped
 
 
 def _history_foldable(key: dict, allow_lots: bool = False) -> bool:
@@ -156,13 +152,35 @@ def _history_foldable(key: dict, allow_lots: bool = False) -> bool:
 	reco resets the aggregate but cannot reconstruct lots; a baseline seeds
 	them)."""
 	since = _since_baseline(key)
-	if _events_since(key, since) < frappe.db.count("Stock Ledger Entry", {**key, "is_cancelled": 0, **since}):
+	live_rows = frappe.db.count("Stock Ledger Entry", {**key, "is_cancelled": 0, **since})
+	if _live_ledger_events(key, _latest_baseline(key)) < live_rows:
 		return False
 	if not _key_has_bundles(key):
 		return True
 	if not allow_lots:
 		return False
 	return not frappe.db.exists("Stock Event", {**key, "kind": "Assertion", "sle": ("is", "set"), **since})
+
+
+def _live_ledger_events(key: dict, baseline: str | None) -> int:
+	"""Events whose ledger row is still live — exactly the rows a fold must
+	replay (the backfill never emits for cancelled rows, dual write does)."""
+	event = frappe.qb.DocType("Stock Event")
+	ledger = frappe.qb.DocType("Stock Ledger Entry")
+	query = (
+		frappe.qb.from_(event)
+		.join(ledger)
+		.on(ledger.name == event.sle)
+		.select(Count(event.name))
+		.where(
+			(event.item_code == key["item_code"])
+			& (event.warehouse == key["warehouse"])
+			& (ledger.is_cancelled == 0)
+		)
+	)
+	if baseline:
+		query = query.where(event.posting_datetime > str(baseline))
+	return cint(query.run()[0][0])
 
 
 def within_refold_cap(key: dict) -> bool:
@@ -205,24 +223,12 @@ def _baseline_active(row: frappe._dict) -> bool:
 	return cint(frappe.db.get_value(row.voucher_type, row.voucher_no, "docstatus")) == 1
 
 
-def _is_baseline(row: frappe._dict) -> bool:
-	return row.kind == "Assertion" and not row.sle
-
-
 def _drop_revoked_baselines(rows: list) -> list:
 	"""A revoked baseline must not fold — replaying it would reset the key to
 	its stale pinned state. Active baselines and ordinary rows pass through."""
-	return [row for row in rows if not _is_baseline(row) or _baseline_active(row)]
+	from erpnext.stock.services.stock_engine_bridge import is_baseline
 
-
-def _bundle_backed_sles(key: dict) -> set[str]:
-	return set(
-		frappe.get_all(
-			"Stock Ledger Entry",
-			filters={**key, "is_cancelled": 0, "serial_and_batch_bundle": ("is", "set")},
-			pluck="name",
-		)
-	)
+	return [row for row in rows if not is_baseline(row) or _baseline_active(row)]
 
 
 def _key_has_bundles(key: dict) -> bool:
@@ -250,16 +256,6 @@ def revalue(
 	Returns REFOLDED when the fold handled it; None means the caller must run
 	the legacy landed-cost machinery instead (lot-tracked key, incomplete
 	history, flags off)."""
-	if not (frappe.conf.get(FLAG) and frappe.conf.get("stock_event_dual_write")):
-		return None
-
-	from erpnext.stock.services import stock_engine_bridge, stock_event_emitter
-
-	engine = stock_engine_bridge.engine()
-	policy = _policy_for(engine, item_code)
-	if policy is None:
-		return None
-
 	source = frappe.db.get_value(
 		"Stock Event",
 		source_event,
@@ -267,6 +263,15 @@ def revalue(
 		as_dict=1,
 	)
 	if not source or source.item_code != item_code or source.warehouse != warehouse:
+		return None
+	if not _enabled_for(source.company):
+		return None
+
+	from erpnext.stock.services import stock_engine_bridge, stock_event_emitter
+
+	engine = stock_engine_bridge.engine()
+	policy = _policy_for(engine, item_code)
+	if policy is None:
 		return None
 
 	emitted = stock_event_emitter.emit_revaluation(
@@ -307,9 +312,9 @@ def revalue(
 	return outcome
 
 
-def can_revalue(item_code: str, warehouse: str) -> bool:
+def can_revalue(item_code: str, warehouse: str, company: str) -> bool:
 	"""Whether a cost revision on this key can take the fold path."""
-	if not (frappe.conf.get(FLAG) and frappe.conf.get("stock_event_dual_write")):
+	if not _enabled_for(company):
 		return False
 	if not (frappe.conf.get(SUPPRESS_FLAG) or frappe.conf.get(GL_ADJUSTMENT_FLAG)):
 		return False
@@ -375,25 +380,9 @@ def _event_row(sle_name: str | None) -> frappe._dict | None:
 	if emitted is not None and emitted.get("sle") == sle_name:
 		return emitted
 
-	rows = frappe.get_all(
-		"Stock Event",
-		filters={"sle": sle_name},
-		fields=[
-			"name",
-			"item_code",
-			"warehouse",
-			"posting_datetime",
-			"kind",
-			"qty_change",
-			"declared_rate",
-			"assert_qty",
-			"assert_rate",
-			"reverses_event",
-			"value_change",
-			"sle",
-		],
-		limit=1,
-	)
+	from erpnext.stock.services.stock_engine_bridge import EVENT_FIELDS
+
+	rows = frappe.get_all("Stock Event", filters={"sle": sle_name}, fields=EVENT_FIELDS, limit=1)
 	return rows[0] if rows else None
 
 
@@ -450,18 +439,8 @@ def _rebuild(engine, event_row: frappe._dict) -> tuple:
 		return None, 0
 
 	rows = [row for row in _rows_since(key, _latest_baseline(key)) if cint(row.name) != cint(event_row.name)]
-
-	bundle_rows = _bundle_backed_sles(key)
-	allocations = _allocations([row.name for row in rows])
 	try:
-		events_list = [
-			stock_engine_bridge.to_event(
-				engine,
-				row,
-				allocations.get(str(row.name)) if row.sle in bundle_rows or _is_baseline(row) else None,
-			)
-			for row in rows
-		]
+		events_list = stock_engine_bridge.events_from_rows(engine, rows)
 	except ValueError:
 		return None, 0
 
@@ -474,10 +453,11 @@ def _rebuild(engine, event_row: frappe._dict) -> tuple:
 def _validate_negative(effect, args: dict, allow_negative_stock: bool) -> None:
 	if effect.qty_after >= -1e-9 or allow_negative_stock:
 		return
-	if cint(frappe.db.get_single_value("Stock Settings", "allow_negative_stock")):
-		return
 
-	from erpnext.stock.stock_ledger import NegativeStockError
+	from erpnext.stock.stock_ledger import NegativeStockError, is_negative_stock_allowed
+
+	if is_negative_stock_allowed(item_code=args.get("item_code")):
+		return
 
 	frappe.throw(
 		frappe._(

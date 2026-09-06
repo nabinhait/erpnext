@@ -6,6 +6,7 @@ models that leg as a spec; fold_voucher realizes it into an ordinary Event
 once its source has folded, so coupled legs share one number in memory and
 nothing is ever written back into a document.
 """
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -24,6 +25,7 @@ _KIND_ORDER = {
 	EventKind.ASSERTION: 2,
 	EventKind.RECEIPT: 3,
 	EventKind.OPENING: 3,
+	EventKind.REVALUATION: 4,
 }
 _SHARE_TOLERANCE = 1e-9
 
@@ -131,8 +133,12 @@ def _realize(leg: CostLinkedLeg, effects_by_id: dict[int, Effect]) -> Event:
 		raise ValueError(f"source leg {leg.cost_from} yielded no consumed_rate")
 	declared_rate = (consumed_rate * leg.share_qty + leg.extra_cost) / leg.qty_change
 	return Event(
-		leg.id, leg.posting_datetime, EventKind.RECEIPT,
-		qty_change=leg.qty_change, declared_rate=declared_rate, allocations=leg.allocations,
+		leg.id,
+		leg.posting_datetime,
+		EventKind.RECEIPT,
+		qty_change=leg.qty_change,
+		declared_rate=declared_rate,
+		allocations=leg.allocations,
 	)
 
 
@@ -168,8 +174,7 @@ def _validate_links(voucher: Voucher, by_id: dict[int, VoucherLeg]) -> None:
 			continue
 		source = by_id.get(leg.cost_from)
 		if not isinstance(source, Leg) or source.event.qty_change >= 0:
-			raise ValueError(
-				f"cost_from={leg.cost_from} must reference an outgoing leg in the same voucher")
+			raise ValueError(f"cost_from={leg.cost_from} must reference an outgoing leg in the same voucher")
 		claimed[leg.cost_from] = claimed.get(leg.cost_from, 0.0) + leg.share_qty
 	for source_id, share in claimed.items():
 		if share > -by_id[source_id].event.qty_change + _SHARE_TOLERANCE:

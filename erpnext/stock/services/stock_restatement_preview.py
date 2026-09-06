@@ -17,7 +17,7 @@ import frappe
 from frappe.utils import flt
 
 from erpnext.stock.services import stock_engine_bridge
-from erpnext.stock.services.stock_shadow import _allocations_by_event, _event_rows
+from erpnext.stock.services.stock_shadow import _event_rows
 
 MAX_KEYS = 200
 
@@ -33,7 +33,7 @@ def run(warehouses: list[str] | None = None, value_tolerance: float = 0.01) -> d
 
 		report["keys_with_lots"] += 1
 		rows = _event_rows(item_code, warehouse)
-		allocations = _allocations_by_event([row.name for row in rows])
+		allocations = stock_engine_bridge.allocations_by_event([row.name for row in rows])
 
 		try:
 			aggregate = engine.replay(

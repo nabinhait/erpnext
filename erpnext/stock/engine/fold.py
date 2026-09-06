@@ -6,6 +6,7 @@ decides whether that is an error. Allocated (lot-tracked) movements run the
 same transitions within each lot's sub-state; specific identification for
 serials falls out of that with no dedicated code.
 """
+
 from __future__ import annotations
 
 from bisect import bisect_left
@@ -14,7 +15,7 @@ from operator import attrgetter
 from .context import FoldContext
 from .event import Event, EventKind
 from .lots import Allocation, LotType
-from .state import Effect, Layer, LotState, State, validate_lot, validate_state
+from .state import QTY_EPSILON, Effect, Layer, LotState, State, validate_lot, validate_state
 
 _EMPTY_STATE = State()
 _SORT_KEY = attrgetter("sort_key")
@@ -30,8 +31,7 @@ def fold(state: State, event: Event, context: FoldContext) -> tuple[State, Effec
 def _receive(state: State, event: Event, context: FoldContext) -> tuple[State, Effect]:
 	if event.allocations:
 		return _fold_allocations(state, event, context)
-	new_state, true_up, variance = _add_stock(
-		state, event.qty_change, event.declared_rate, event.id, context)
+	new_state, true_up, variance = _add_stock(state, event.qty_change, event.declared_rate, event.id, context)
 	return new_state, _effect(state, new_state, event, true_up=true_up, variance=variance)
 
 
@@ -42,19 +42,26 @@ def _revalue(state: State, event: Event, context: FoldContext) -> tuple[State, E
 	top-level and inside lots. Ordered at the source's instant (with a later
 	id), so everything downstream trues up in the same refold. If nothing of
 	the source survives at this point, the revision is a no-op here and the
-	caller carries the residue."""
-	matched_qty = _matched_qty(state, event.reverses_event)
+	caller carries the residue.
+
+	Under a merged-layer policy no layer remembers its receipt, so the revision
+	uplifts the whole pool — the legacy moving-average behaviour."""
+	source = event.reverses_event
+	matched_qty = _matched_qty(state, source)
+	if matched_qty <= 0 and context.policy.merges_layers:
+		source = None
+		matched_qty = _matched_qty(state, source)
 	if matched_qty <= 0:
 		return state, _effect(state, state, event)
 
 	per_unit = event.value_change / matched_qty
-	layers = tuple(_uplifted(layer, event.reverses_event, per_unit) for layer in state.layers)
+	layers = tuple(_uplifted(layer, source, per_unit) for layer in state.layers)
 	lots = tuple(
 		LotState(
 			lot_type=lot.lot_type,
 			lot_id=lot.lot_id,
 			state=State(
-				layers=tuple(_uplifted(layer, event.reverses_event, per_unit) for layer in lot.state.layers),
+				layers=tuple(_uplifted(layer, source, per_unit) for layer in lot.state.layers),
 				exposure_qty=lot.state.exposure_qty,
 				exposure_rate=lot.state.exposure_rate,
 			),
@@ -62,19 +69,25 @@ def _revalue(state: State, event: Event, context: FoldContext) -> tuple[State, E
 		for lot in state.lots
 	)
 	new_state = State(
-		layers=layers, exposure_qty=state.exposure_qty, exposure_rate=state.exposure_rate, lots=lots)
+		layers=layers, exposure_qty=state.exposure_qty, exposure_rate=state.exposure_rate, lots=lots
+	)
 	return new_state, _effect(state, new_state, event)
 
 
-def _matched_qty(state: State, source_event_id: int) -> float:
-	qty = sum(layer.qty for layer in state.layers if layer.source_event_id == source_event_id)
+def _matched_qty(state: State, source_event_id: int | None) -> float:
+	"""Quantity in the layers the source created; every layer when source is None."""
+	qty = sum(layer.qty for layer in state.layers if _from_source(layer, source_event_id))
 	for lot in state.lots:
-		qty += sum(layer.qty for layer in lot.state.layers if layer.source_event_id == source_event_id)
+		qty += sum(layer.qty for layer in lot.state.layers if _from_source(layer, source_event_id))
 	return qty
 
 
-def _uplifted(layer: Layer, source_event_id: int, per_unit: float) -> Layer:
-	if layer.source_event_id != source_event_id:
+def _from_source(layer: Layer, source_event_id: int | None) -> bool:
+	return source_event_id is None or layer.source_event_id == source_event_id
+
+
+def _uplifted(layer: Layer, source_event_id: int | None, per_unit: float) -> Layer:
+	if not _from_source(layer, source_event_id):
 		return layer
 	return Layer(layer.qty, layer.rate + per_unit, layer.source_event_id)
 
@@ -84,8 +97,8 @@ def _issue(state: State, event: Event, context: FoldContext) -> tuple[State, Eff
 		return _fold_allocations(state, event, context)
 	qty = -event.qty_change
 	new_state, cost, negative = _remove_stock(
-		state, qty, context, prefer_rate=event.declared_rate,
-		rate_buckets=event.rate_buckets)
+		state, qty, context, prefer_rate=event.declared_rate, rate_buckets=event.rate_buckets
+	)
 	effect = _effect(state, new_state, event, consumed_rate=cost / qty, negative=negative)
 	return new_state, effect
 
@@ -107,7 +120,8 @@ def _assert_balance(state: State, event: Event, context: FoldContext) -> tuple[S
 		rate = allocation.declared_rate
 		rate = rate if rate is not None else event.assert_rate
 		lot = LotState(
-			allocation.lot_type, allocation.lot_id,
+			allocation.lot_type,
+			allocation.lot_id,
 			State(layers=(Layer(allocation.qty, rate, event.id),)),
 		)
 		validate_lot(lot)
@@ -128,11 +142,13 @@ def _reverse(state: State, event: Event, context: FoldContext) -> tuple[State, E
 		return _fold_allocations(state, event, context)
 	if event.qty_change > 0:
 		new_state, true_up, variance = _add_stock(
-			state, event.qty_change, event.declared_rate, event.id, context)
+			state, event.qty_change, event.declared_rate, event.id, context
+		)
 		return new_state, _effect(state, new_state, event, true_up=true_up, variance=variance)
 	qty = -event.qty_change
 	new_state, cost, negative = _remove_stock(
-		state, qty, context, prefer_source=event.reverses_event)
+		state, qty, context, prefer_source=event.reverses_event, rate_buckets=event.rate_buckets
+	)
 	effect = _effect(state, new_state, event, consumed_rate=cost / qty, negative=negative)
 	return new_state, effect
 
@@ -157,14 +173,13 @@ def _fold_allocations(state: State, event: Event, context: FoldContext) -> tuple
 		if allocation.qty > 0:
 			rate = allocation.declared_rate
 			rate = rate if rate is not None else event.declared_rate
-			sub, sub_true_up, sub_variance = _add_stock(
-				sub, allocation.qty, rate, event.id, context)
+			sub, sub_true_up, sub_variance = _add_stock(sub, allocation.qty, rate, event.id, context)
 			true_up += sub_true_up
 			variance += sub_variance
 		else:
 			sub, sub_cost, sub_negative = _remove_stock(
-				sub, -allocation.qty, context, prefer_source=prefer,
-				prefer_rate=event.declared_rate)
+				sub, -allocation.qty, context, prefer_source=prefer, prefer_rate=event.declared_rate
+			)
 			cost += sub_cost
 			outward += -allocation.qty
 			negative = negative or sub_negative
@@ -175,20 +190,30 @@ def _fold_allocations(state: State, event: Event, context: FoldContext) -> tuple
 	remainder = event.qty_change - sum(a.qty for a in event.allocations)
 	if remainder > 1e-9:
 		current, pool_true_up, pool_variance = _add_stock(
-			current, remainder, event.declared_rate, event.id, context)
+			current, remainder, event.declared_rate, event.id, context
+		)
 		true_up += pool_true_up
 		variance += pool_variance
 	elif remainder < -1e-9:
 		current, pool_cost, pool_negative = _remove_stock(
-			current, -remainder, context, prefer_source=prefer,
-			prefer_rate=event.declared_rate)
+			current,
+			-remainder,
+			context,
+			prefer_source=prefer,
+			prefer_rate=event.declared_rate,
+			rate_buckets=event.rate_buckets,
+		)
 		cost += pool_cost
 		outward += -remainder
 		negative = negative or pool_negative
 	effect = _effect(
-		state, current, event,
+		state,
+		current,
+		event,
 		consumed_rate=cost / outward if outward else None,
-		negative=negative, true_up=true_up, variance=variance,
+		negative=negative,
+		true_up=true_up,
+		variance=variance,
 	)
 	return current, effect
 
@@ -203,7 +228,7 @@ def _add_stock(
 	layers, variance = state.layers, 0.0
 	if into_layers > 0:
 		layers, variance = context.policy.receive(state.layers, into_layers, rate, event_id)
-	exposure_left = state.exposure_qty - cover
+	exposure_left = _snap(state.exposure_qty - cover)
 	new_state = State(
 		layers=layers,
 		exposure_qty=exposure_left,
@@ -214,7 +239,10 @@ def _add_stock(
 
 
 def _remove_stock(
-	state: State, qty: float, context: FoldContext, prefer_source: int | None = None,
+	state: State,
+	qty: float,
+	context: FoldContext,
+	prefer_source: int | None = None,
 	prefer_rate: float | None = None,
 	rate_buckets: tuple[tuple[float, float], ...] = (),
 ) -> tuple[State, float, bool]:
@@ -232,8 +260,7 @@ def _remove_stock(
 	for bucket_qty, bucket_rate in rate_buckets:
 		if taken >= qty:
 			break
-		layers, bucket_cost, bucket_taken = _take_at_rate(
-			layers, min(bucket_qty, qty - taken), bucket_rate)
+		layers, bucket_cost, bucket_taken = _take_at_rate(layers, min(bucket_qty, qty - taken), bucket_rate)
 		cost += bucket_cost
 		taken += bucket_taken
 	if prefer_rate is not None and taken < qty:
@@ -242,17 +269,16 @@ def _remove_stock(
 		taken += rate_taken
 	held = sum(layer.qty for layer in layers)
 	from_policy = min(qty - taken, held)
-	if from_policy > 0:
+	if from_policy > QTY_EPSILON:
 		layers, policy_cost = context.policy.consume(layers, from_policy)
 		cost += policy_cost
-	shortfall = qty - taken - from_policy
+	shortfall = _snap(qty - taken - from_policy)
 	exposure_qty, exposure_rate = state.exposure_qty, state.exposure_rate
 	if shortfall > 0:
 		provisional = _provisional_rate(cost, taken + from_policy, state, context)
 		cost += shortfall * provisional
 		exposure_qty, exposure_rate = _blend(exposure_qty, exposure_rate, shortfall, provisional)
-	new_state = State(
-		layers=layers, exposure_qty=exposure_qty, exposure_rate=exposure_rate, lots=state.lots)
+	new_state = State(layers=layers, exposure_qty=exposure_qty, exposure_rate=exposure_rate, lots=state.lots)
 	return new_state, cost, shortfall > 0
 
 
@@ -269,7 +295,7 @@ def _take_from_source(
 		take = min(qty - taken, layer.qty)
 		cost += take * layer.rate
 		taken += take
-		if layer.qty > take:
+		if layer.qty - take > QTY_EPSILON:
 			kept.append(Layer(layer.qty - take, layer.rate, layer.source_event_id))
 	return tuple(kept), cost, taken
 
@@ -287,14 +313,12 @@ def _take_at_rate(
 		take = min(qty - taken, layer.qty)
 		cost += take * layer.rate
 		taken += take
-		if layer.qty > take:
+		if layer.qty - take > QTY_EPSILON:
 			kept.append(Layer(layer.qty - take, layer.rate, layer.source_event_id))
 	return tuple(kept), cost, taken
 
 
-def _set_lot(
-	state: State, allocation: Allocation, sub: State, index: int, present: bool
-) -> State:
+def _set_lot(state: State, allocation: Allocation, sub: State, index: int, present: bool) -> State:
 	"""Replace one lot's sub-state, keeping lots sorted and dropping emptied lots."""
 	return State(
 		layers=state.layers,
@@ -309,18 +333,20 @@ def _splice_lot(
 ) -> tuple[LotState, ...]:
 	"""Splice one entry into the sorted lots tuple at its pre-located index — no re-sort."""
 	if sub == _EMPTY_STATE:
-		return lots[:index] + lots[index + 1:] if present else lots
+		return lots[:index] + lots[index + 1 :] if present else lots
 	entry = LotState(allocation.lot_type, allocation.lot_id, sub)
-	return lots[:index] + (entry,) + lots[index + 1 if present else index:]
+	return lots[:index] + (entry,) + lots[index + 1 if present else index :]
 
 
-def _locate_lot(
-	lots: tuple[LotState, ...], lot_type: LotType, lot_id: str
-) -> tuple[int, bool]:
+def _locate_lot(lots: tuple[LotState, ...], lot_type: LotType, lot_id: str) -> tuple[int, bool]:
 	"""Bisect the sorted lots tuple: (position of the lot or its insertion point, found?)."""
 	key = (lot_type.value, lot_id)
 	index = bisect_left(lots, key, key=_SORT_KEY)
 	return index, index < len(lots) and lots[index].sort_key == key
+
+
+def _snap(qty: float) -> float:
+	return 0.0 if qty < QTY_EPSILON else qty
 
 
 def _provisional_rate(cost: float, covered_qty: float, state: State, context: FoldContext) -> float:
@@ -337,7 +363,10 @@ def _blend(qty_a: float, rate_a: float, qty_b: float, rate_b: float) -> tuple[fl
 
 
 def _effect(
-	old: State, new: State, event: Event, *,
+	old: State,
+	new: State,
+	event: Event,
+	*,
 	consumed_rate: float | None = None,
 	negative: bool = False,
 	true_up: float = 0.0,
