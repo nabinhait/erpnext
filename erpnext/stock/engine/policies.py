@@ -34,7 +34,7 @@ class LayeredPolicy(ValuationPolicy):
 	newest_first = False
 
 	def receive(self, layers: Layers, qty: float, rate: float, event_id: int) -> tuple[Layers, float]:
-		return layers + (Layer(qty, rate, event_id),), 0.0
+		return (*layers, Layer(qty, rate, event_id)), 0.0
 
 	def consume(self, layers: Layers, qty: float) -> tuple[Layers, float]:
 		remaining = list(layers)
