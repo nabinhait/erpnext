@@ -3,8 +3,8 @@
 ## ⟲ Session-restart snapshot — 2026-09-05 (evening)
 
 **Where everything is:**
-- **One program branch: `stock-ledger-redesign`** (origin = nabinhait/erpnext), tip `eea2cc91c1`
-  (review pass), rebased onto upstream develop (5beed5f4, Sep 5). frappe fast-forwarded
+- **One program branch: `stock-ledger-redesign`** (origin = nabinhait/erpnext), tip `5f4eefca27`
+  (vocabulary rename), rebased onto upstream develop (5beed5f4, Sep 5). frappe fast-forwarded
   to `b56649ed` (Sep 4) — required by new erpnext. Safety tag `pre-rebase-2026-09-05` = old tip.
   The old stock-ledger-cutover name and the M2–M4-only branch are gone (renamed/deleted).
 - **Engine is vendored**: `erpnext/stock/engine/` (63 frappe-runner tests incl. property suite;
@@ -951,4 +951,24 @@ is_opening_assertion); equivalent_value deleted. Battery: engine 63, authority
 13, read 5, recompute 1, event 2, closing 7, opening adjustment 2,
 restatement 1, landed cost voucher 27 — all green (three errors seen
 once came from two test runs overlapping on the site).
+
+2026-09-06 (late) — Vocabulary rename (5f4eefca27), Nabin's call after the
+naming review: full tier including DocTypes. fold→apply_event, fold
+authority→stock_engine_valuation, refold→recompute
+(stock_engine_recompute + Stock Recompute Request), fold read→
+stock_engine_snapshots (Stock Engine Snapshot), cutover/baseline→
+stock_engine_opening / opening assertion, bridge→stock_engine_adapter,
+emitter→stock_event_writer, guard→stock_write_audit, shadow→
+stock_engine_parity_check, reports→Engine Stock Balance/Ledger/Ageing.
+Pre-model-sync patch rename_stock_engine_doctypes renames the three
+DocTypes (frappe.rename_doc, tables + links) and drops the old report
+records. Site-config flags renamed stock_fold_*→stock_engine_* — update
+site_config on test2/apnaklub when migrating. The design doc keeps
+"fold" as the mathematical term in prose and opens with a glossary; the
+program log entries above were rewritten mechanically (checkpoint→
+snapshot, baseline→opening assertion, refold→recompute) so older entries
+read in the new vocabulary. Battery on test-runner-site after
+`bench migrate` through the rename patch: engine 63, valuation 13,
+snapshots 5, recompute 1, event 2, closing 7, opening adjustment 2,
+restatement 1, landed cost 27, SLE 29, batch 19 — green.
 
