@@ -39,7 +39,7 @@ def run(
 	shard: int | None = None,
 	shards: int | None = None,
 ) -> dict:
-	engine = stock_engine_bridge.engine()
+	engine = stock_engine_bridge.load_engine()
 	report = {
 		"keys": 0,
 		"events": 0,
@@ -315,7 +315,7 @@ def _legacy_inconsistent(rows, legacy: dict, qty_tolerance: float) -> bool:
 
 def diagnose(item_code: str, warehouse: str, limit: int = 12) -> list[dict]:
 	"""Row-by-row legacy vs fold comparison for one key, from the first divergence."""
-	engine = stock_engine_bridge.engine()
+	engine = stock_engine_bridge.load_engine()
 	policy = stock_engine_bridge.policy_for(item_code, engine)
 	rows = _event_rows(item_code, warehouse)
 	allocations = stock_engine_bridge.allocations_by_event([row.name for row in rows])

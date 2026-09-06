@@ -30,7 +30,7 @@ CHECKPOINT_BATCH = 500
 
 def state_as_of(item_code: str, warehouse: str, as_of: str):
 	"""The key's fold state at a moment: nearest checkpoint plus folded tail."""
-	engine = stock_engine_bridge.engine()
+	engine = stock_engine_bridge.load_engine()
 	start, after = _start_state(engine, item_code, warehouse, as_of)
 	events = _events(engine, item_code, warehouse, after=after, upto=as_of)
 	result = engine.replay(events, engine.FoldContext(policy=_policy(engine, item_code)), start=start)
@@ -86,7 +86,7 @@ def _last_assertion_key(item_code: str, warehouse: str, anchor: tuple) -> tuple 
 
 def ledger_rows(item_code: str, warehouse: str, from_dt: str, to_dt: str) -> list[dict]:
 	"""Running per-event rows for a ledger view of the window."""
-	engine = stock_engine_bridge.engine()
+	engine = stock_engine_bridge.load_engine()
 	opening = state_as_of(item_code, warehouse, from_dt)
 	events = _events(engine, item_code, warehouse, after=from_dt, upto=to_dt)
 	result = engine.replay(events, engine.FoldContext(policy=_policy(engine, item_code)), start=opening)
@@ -146,7 +146,7 @@ def create_checkpoints(company: str, to_date, closing_entry: str | None = None) 
 	Keys with no events since their previous checkpoint are skipped — reads
 	fall back to the older checkpoint, so sparse keys cost nothing per period.
 	"""
-	engine = stock_engine_bridge.engine()
+	engine = stock_engine_bridge.load_engine()
 	as_of = stock_engine_bridge.end_of_day(to_date)
 	created = 0
 	buffer: list[dict] = []

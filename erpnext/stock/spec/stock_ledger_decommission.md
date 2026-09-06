@@ -14,7 +14,7 @@ the checklist — nothing here may be deleted until its precondition holds.
 2. Shadow diff (`stock_shadow.run`) has reported zero class (a)/(b)
    mismatches for the agreed window on every cut-over company, and GL
    reconciliation passes.
-3. The Phase 4 lot restatement (`stock_restatement_preview.run` reviewed and
+3. The Phase 4 lot restatement (`stock_lot_restatement_preview.run` reviewed and
    applied) is complete — serial/batch valuation runs on allocations, not on
    `deprecated_serial_batch.py`.
 4. The bypass log (`log_unrouted_stock_writes`) has stayed quiet long enough

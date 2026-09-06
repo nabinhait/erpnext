@@ -92,7 +92,7 @@ def _try_fold(args: dict, allow_negative_stock: bool) -> str | None:
 
 	from erpnext.stock.services import stock_engine_bridge
 
-	engine = stock_engine_bridge.engine()
+	engine = stock_engine_bridge.load_engine()
 	policy = _policy_for(engine, args.get("item_code"))
 	if policy is None:
 		return None
@@ -269,7 +269,7 @@ def revalue(
 
 	from erpnext.stock.services import stock_engine_bridge, stock_event_emitter
 
-	engine = stock_engine_bridge.engine()
+	engine = stock_engine_bridge.load_engine()
 	policy = _policy_for(engine, item_code)
 	if policy is None:
 		return None
@@ -321,7 +321,7 @@ def can_revalue(item_code: str, warehouse: str, company: str) -> bool:
 
 	from erpnext.stock.services import stock_engine_bridge
 
-	engine = stock_engine_bridge.engine()
+	engine = stock_engine_bridge.load_engine()
 	if _policy_for(engine, item_code) is None:
 		return False
 	key = {"item_code": item_code, "warehouse": warehouse}
@@ -472,7 +472,9 @@ def _validate_negative(effect, args: dict, allow_negative_stock: bool) -> None:
 	)
 
 
-def _project_sle(sle_name: str, state, qty_after: float, value: float, svd: float, policy, engine) -> None:
+def _project_sle(
+	sle_name: str, state, qty_after: float, value: float, value_delta: float, policy, engine
+) -> None:
 	"""Write a fold result into the legacy SLE projection."""
 	from erpnext.stock.services import stock_ledger_writer
 
@@ -485,7 +487,7 @@ def _project_sle(sle_name: str, state, qty_after: float, value: float, svd: floa
 			"qty_after_transaction": qty_after,
 			"valuation_rate": state.valuation_rate,
 			"stock_value": value,
-			"stock_value_difference": svd,
+			"stock_value_difference": value_delta,
 			"stock_queue": json.dumps(stock_queue),
 		},
 	)

@@ -74,16 +74,16 @@ class TestStockFoldAuthority(ERPNextTestSuite):
 			frappe.conf.stock_fold_authoritative = 1
 			fold_vouchers = self._run_backdate_scenario(item, fold_warehouse, company)
 
-			# the backdated voucher's own GL is posted from fold-computed svd at
+			# the backdated voucher's own GL is posted from fold-computed value difference at
 			# submit — correct before any repost runs
 			backdated = fold_vouchers[-2]
-			svd = frappe.db.get_value(
+			value_difference = frappe.db.get_value(
 				"Stock Ledger Entry",
 				{"voucher_no": backdated, "is_cancelled": 0},
 				"stock_value_difference",
 			)
 			gl_debit = sum(row.debit for row in self._gl_rows(backdated))
-			self.assertAlmostEqual(gl_debit, svd, places=4)
+			self.assertAlmostEqual(gl_debit, value_difference, places=4)
 
 			# GL corrections for previously posted vouchers still ride the
 			# coexisting repost; process both sides, then GL must match exactly
@@ -633,7 +633,13 @@ class TestStockFoldAuthority(ERPNextTestSuite):
 				"Stock Settings", "auto_create_serial_and_batch_bundle_for_outward", previous
 			)
 
-		for label, (legacy_warehouse, fold_warehouse, legacy_vouchers, fold_vouchers, item) in results.items():
+		for label, (
+			legacy_warehouse,
+			fold_warehouse,
+			legacy_vouchers,
+			fold_vouchers,
+			item,
+		) in results.items():
 			self.assertFalse(
 				frappe.get_all("Repost Item Valuation", filters={"voucher_no": ("in", fold_vouchers)}),
 				msg=label,
@@ -809,9 +815,7 @@ class TestStockFoldAuthority(ERPNextTestSuite):
 
 		# the revaluation fact exists and the LCV carries its GL
 		self.assertTrue(
-			frappe.db.exists(
-				"Stock Event", {"kind": "Revaluation", "voucher_no": fold_vouchers[2]}
-			)
+			frappe.db.exists("Stock Event", {"kind": "Revaluation", "voucher_no": fold_vouchers[2]})
 		)
 		self.assertTrue(
 			frappe.get_all("GL Entry", filters={"voucher_no": fold_vouchers[2], "is_cancelled": 0})

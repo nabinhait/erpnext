@@ -10,7 +10,7 @@ unified model). The per-key value difference is exactly what the one-time
 ``use_batchwise_valuation`` restatement would post, so the numbers can be
 reviewed per company before anything irreversible runs.
 
-    bench --site <site> execute erpnext.stock.services.stock_restatement_preview.run
+    bench --site <site> execute erpnext.stock.services.stock_lot_restatement_preview.run
 """
 
 import frappe
@@ -23,7 +23,7 @@ MAX_KEYS = 200
 
 
 def run(warehouses: list[str] | None = None, value_tolerance: float = 0.01) -> dict:
-	engine = stock_engine_bridge.engine()
+	engine = stock_engine_bridge.load_engine()
 	report = {"keys_with_lots": 0, "keys_restated": 0, "total_delta": 0.0, "keys": [], "errors": []}
 
 	for item_code, warehouse in _lot_keys(warehouses):

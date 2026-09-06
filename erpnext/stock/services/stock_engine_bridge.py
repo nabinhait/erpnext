@@ -15,7 +15,7 @@ from frappe.utils import cint, flt
 from erpnext.stock.utils import get_valuation_method
 
 
-def engine() -> frappe._dict:
+def load_engine() -> frappe._dict:
 	from erpnext.stock.engine.context import FoldContext
 	from erpnext.stock.engine.event import Event, EventKind
 	from erpnext.stock.engine.lots import Allocation, LotType
@@ -39,28 +39,28 @@ def engine() -> frappe._dict:
 	)
 
 
-def policy_for(item_code: str, eng: frappe._dict | None = None, honor_serialwise: bool = True):
+def policy_for(item_code: str, engine: frappe._dict | None = None, honor_serialwise: bool = True):
 	"""Engine policy for the item, or None when its method has no fold parity yet.
 
 	Serial-wise items fold layered regardless of their valuation method: each
 	unit leaves at its own receipt rate via rate buckets, which need the
 	receipt layers kept distinct — the method only matters for their
 	non-serialized siblings. History replays (shadow) pass False."""
-	eng = eng or engine()
+	engine = engine or load_engine()
 	if honor_serialwise and _serialwise_valuation(item_code):
-		return eng.Fifo()
+		return engine.Fifo()
 	method = get_valuation_method(item_code)
 	if method == "Standard Cost":
 		return None
 	if method == "LIFO":
-		return eng.Lifo()
+		return engine.Lifo()
 	if method == "Moving Average":
-		return eng.MovingAverage()
-	return eng.Fifo()
+		return engine.MovingAverage()
+	return engine.Fifo()
 
 
 def to_event(
-	eng: frappe._dict,
+	engine: frappe._dict,
 	row: frappe._dict,
 	allocations: list[frappe._dict] | None = None,
 	honor_batch_flag: bool = True,
@@ -73,12 +73,12 @@ def to_event(
 	outward picks turn into rate buckets (each unit leaves at its own
 	receipt rate), everything else rides the pool. Shadow and restatement
 	trials pass False to replay history's own shape."""
-	kind = eng.EventKind(row.kind)
+	kind = engine.EventKind(row.kind)
 	if row.kind == "Reversal" and not row.reverses_event:
 		# best-effort pairing failed; fold it as the movement it is
-		kind = eng.EventKind.RECEIPT if flt(row.qty_change) > 0 else eng.EventKind.ISSUE
+		kind = engine.EventKind.RECEIPT if flt(row.qty_change) > 0 else engine.EventKind.ISSUE
 
-	if kind is eng.EventKind.ASSERTION and row.sle:
+	if kind is engine.EventKind.ASSERTION and row.sle:
 		# a legacy reco resets the whole key; lots reconverge from later facts.
 		# An SLE-less assertion is a cutover baseline: its allocations seed lots.
 		allocations = None
@@ -93,14 +93,14 @@ def to_event(
 			allocations = [frappe._dict({**a, "qty_change": -flt(a.qty_change)}) for a in allocations]
 
 	rate_buckets = ()
-	if allocations and honor_batch_flag and kind is not eng.EventKind.ASSERTION:
+	if allocations and honor_batch_flag and kind is not engine.EventKind.ASSERTION:
 		serials = [a for a in allocations if a.serial_no]
 		if serials:
 			allocations = [a for a in allocations if not a.serial_no]
 			if flt(row.qty_change) < 0 and _serialwise_valuation(row.get("item_code")):
 				rate_buckets = _rate_buckets(serials)
 
-	return eng.Event(
+	return engine.Event(
 		id=cint(row.name),
 		posting_datetime=row.posting_datetime,
 		kind=kind,
@@ -110,7 +110,7 @@ def to_event(
 		assert_rate=flt(row.assert_rate) if row.kind == "Assertion" else None,
 		reverses_event=cint(row.reverses_event) or None,
 		value_change=flt(row.get("value_change")),
-		allocations=tuple(_to_allocation(eng, alloc) for alloc in allocations or []),
+		allocations=tuple(_to_allocation(engine, alloc) for alloc in allocations or []),
 		rate_buckets=rate_buckets,
 	)
 
@@ -139,7 +139,7 @@ EVENT_FIELDS = (
 )
 
 
-def events_from_rows(eng: frappe._dict, rows: list[frappe._dict]) -> list:
+def events_from_rows(engine: frappe._dict, rows: list[frappe._dict]) -> list:
 	"""Engine events for Stock Event rows, in the given order.
 
 	Lot allocations reach the engine only for bundle-backed ledger rows and
@@ -149,7 +149,9 @@ def events_from_rows(eng: frappe._dict, rows: list[frappe._dict]) -> list:
 	allocations = allocations_by_event([row.name for row in rows])
 	return [
 		to_event(
-			eng, row, allocations.get(str(row.name)) if row.sle in bundle_rows or is_baseline(row) else None
+			engine,
+			row,
+			allocations.get(str(row.name)) if row.sle in bundle_rows or is_baseline(row) else None,
 		)
 		for row in rows
 	]
@@ -203,18 +205,18 @@ def serialize_state(state) -> dict:
 	}
 
 
-def deserialize_state(eng: frappe._dict, data: dict):
-	return eng.State(
+def deserialize_state(engine: frappe._dict, data: dict):
+	return engine.State(
 		layers=tuple(
-			eng.Layer(qty=layer[0], rate=layer[1], source_event_id=layer[2]) for layer in data["layers"]
+			engine.Layer(qty=layer[0], rate=layer[1], source_event_id=layer[2]) for layer in data["layers"]
 		),
 		exposure_qty=data["exposure_qty"],
 		exposure_rate=data["exposure_rate"],
 		lots=tuple(
-			eng.LotState(
-				lot_type=eng.LotType(lot["lot_type"]),
+			engine.LotState(
+				lot_type=engine.LotType(lot["lot_type"]),
 				lot_id=lot["lot_id"],
-				state=deserialize_state(eng, lot["state"]),
+				state=deserialize_state(engine, lot["state"]),
 			)
 			for lot in data["lots"]
 		),
@@ -244,9 +246,9 @@ def _rate_buckets(serials: list[frappe._dict]) -> tuple[tuple[float, float], ...
 	return tuple((qty, rate) for rate, qty in sorted(buckets.items()))
 
 
-def _to_allocation(eng: frappe._dict, alloc: frappe._dict):
-	lot_type = eng.LotType.SERIAL if alloc.serial_no else eng.LotType.BATCH
-	return eng.Allocation(
+def _to_allocation(engine: frappe._dict, alloc: frappe._dict):
+	lot_type = engine.LotType.SERIAL if alloc.serial_no else engine.LotType.BATCH
+	return engine.Allocation(
 		lot_type=lot_type,
 		lot_id=alloc.serial_no or alloc.batch_no,
 		qty=flt(alloc.qty_change),

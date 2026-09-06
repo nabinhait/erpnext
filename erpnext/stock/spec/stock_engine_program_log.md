@@ -454,7 +454,7 @@ So the M4 branch stays frozen for the real-site test, cutover work lives on
   rebuilds from events. Parity test green: identical FIFO scenario under
   both engines → matching SLE fields, queues, Bins.
 - **M6 instruments (0c58f396a)** — shadow folds lot allocations
-  (lot-tracked keys now diffed, not skipped); `stock_restatement_preview.py`
+  (lot-tracked keys now diffed, not skipped); `stock_lot_restatement_preview.py`
   folds each lot-carrying key aggregate-vs-lot and reports the value delta
   the one-time batchwise restatement would post.
 - **M7 (472d8feec)** — `spec/stock_ledger_decommission.md`: what gets

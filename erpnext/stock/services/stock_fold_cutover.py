@@ -99,7 +99,7 @@ def opening_delta(company: str, moment: str) -> list[frappe._dict]:
 	returned with ``skipped`` set and no delta."""
 	from erpnext.stock.services import stock_engine_bridge, stock_fold_read
 
-	engine = stock_engine_bridge.engine()
+	engine = stock_engine_bridge.load_engine()
 	checkpoints = stock_fold_read.checkpoint_states(engine, company, moment)
 	rows = []
 	for balance in _closing_balances(company, moment):

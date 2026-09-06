@@ -62,7 +62,7 @@ def refold_key(item_code: str, warehouse: str, from_datetime: str, args: dict) -
 	key cannot fold at all (its legacy values stay)."""
 	from erpnext.stock.services import stock_fold_authority as authority
 
-	engine = stock_engine_bridge.engine()
+	engine = stock_engine_bridge.load_engine()
 	policy = stock_engine_bridge.policy_for(item_code, engine)
 	key = {"item_code": item_code, "warehouse": warehouse}
 	if policy is None or not authority._history_foldable(key, allow_lots=True):
@@ -178,7 +178,7 @@ def _refold_rows(
 				projection["state"],
 				projection["qty_after"],
 				projection["value"],
-				projection["svd"],
+				projection["value_delta"],
 				policy,
 				engine,
 			)
@@ -310,7 +310,7 @@ def _absorbed_projections(rows: list, result, start_value: float) -> dict:
 		projections[row.sle] = {
 			"qty_after": result.effects[cint(row.name)].qty_after,
 			"value": value,
-			"svd": value - prev_value,
+			"value_delta": value - prev_value,
 			"state": state,
 		}
 		prev_value = value
@@ -322,7 +322,7 @@ def _absorbed_projections(rows: list, result, start_value: float) -> dict:
 def _post_gl_adjustment(args: dict, key: dict, projections: dict, live: dict) -> None:
 	"""Append-only GL: never rewrite affected vouchers' postings.
 
-	The net svd deltas the refold caused are posted as fresh GL rows on the
+	The net value-delta changes the refold caused are posted as fresh GL rows on the
 	triggering voucher, netted per counter account and dated on the affected
 	voucher's own posting date — every correction takes effect exactly when
 	the movement it corrects took effect, so stock value and stock account
@@ -346,7 +346,7 @@ def _post_gl_adjustment(args: dict, key: dict, projections: dict, live: dict) ->
 		if stored is None or (stored.voucher_type, stored.voucher_no) == tuple(excluded):
 			continue
 
-		delta = flt(projection["svd"]) - flt(stored.stock_value_difference)
+		delta = flt(projection["value_delta"]) - flt(stored.stock_value_difference)
 		if abs(delta) < 0.005:
 			continue
 
@@ -410,7 +410,7 @@ def _regenerate_gl(args: dict, instant: str, live_sles) -> None:
 	"""With the legacy repost suppressed, correct affected vouchers' GL inline.
 
 	Comparison-based regeneration: only vouchers whose GL no longer matches
-	their (refolded) svd get rewritten. The voucher being submitted is
+	their (refolded) value delta get rewritten. The voucher being submitted is
 	excluded — its GL posts normally later in the same submit."""
 	from erpnext.accounts.utils import repost_gle_for_stock_vouchers
 
