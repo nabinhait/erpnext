@@ -1,11 +1,13 @@
 """Cross-key cost propagation (design doc §1.9, §2.5).
 
-A backdate recomputes its own key. If that recompute changes the consumed rate of an
-outgoing leg that realized an inward event on another key (a CostLink), the
-inward event is re-realized at the new rate and its key recomputed from that
-point — breadth-first until every link converges. Both convergence cuts hold:
-a recompute that converges before reaching a linked source never fires the link,
-and a reached source whose rate is unchanged within tolerance does not fire.
+A backdate recomputes its own key. If that recompute changes what an outgoing
+leg gave up, every cost pool fed by that leg is rebuilt and its rule re-run, so
+all of the pool's inward legs are re-realized together — never one rescaled in
+isolation, which is what keeps a fixed-rate output fixed and lands the whole
+difference on the outputs absorbing the residual. Each re-realized output's key
+is then recomputed, breadth-first until every pool converges. Both convergence
+cuts hold: a recompute that converges before reaching a pool's sources never
+fires it, and reached sources whose cost is unchanged within tolerance do not.
 """
 
 from __future__ import annotations
@@ -16,22 +18,9 @@ from dataclasses import dataclass, replace
 
 from .context import EngineContext
 from .event import Event
+from .pooling import CostPool, PooledLeg, allocate_pool, pool_value, pooled_rate
 from .replay import ReplayResult, replay, replay_after_insert
-from .state import EventEffect, State
-
-
-@dataclass(frozen=True, slots=True)
-class CostLink:
-	"""The persisted fact that `target_event_id` (an inward event on
-	`target_key`) was realized from `source_event_id`'s consumed rate:
-	declared_rate = (consumed_rate * cost_share_qty + extra_cost) / qty_change.
-	"""
-
-	source_event_id: int
-	target_key: str
-	target_event_id: int
-	cost_share_qty: float
-	extra_cost: float = 0.0
+from .state import QTY_EPSILON, EventEffect, State
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,9 +35,9 @@ class PropagationResult:
 	invalidations: tuple[tuple[str, int], ...]
 
 
-def propagate_cost_links(
+def propagate_cost_pools(
 	streams: Mapping[str, list[Event]],
-	links: Collection[CostLink],
+	pools: Collection[CostPool],
 	inserted: tuple[str, Event],
 	context: EngineContext | Mapping[str, EngineContext],
 	*,
@@ -56,24 +45,24 @@ def propagate_cost_links(
 	tolerance: float = 1e-9,
 	iteration_cap: int = 1000,
 ) -> PropagationResult:
-	"""Recompute the trigger key, then walk fired cost links breadth-first.
+	"""Recompute the trigger key, then walk fired cost pools breadth-first.
 
 	`inserted` is (key, event); the event must already be in its key's stream.
 	`recorded` optionally supplies prior replay results per key — the trigger
 	key's must come from its stream WITHOUT the inserted event; keys not
 	supplied are replayed internally from the given streams. Raises
-	RuntimeError past `iteration_cap` total link firings (suspected cycle —
-	well-formed voucher links cannot cycle, since a link points forward from
-	an outgoing leg to a later inward event on another key).
+	RuntimeError past `iteration_cap` total pool firings (suspected cycle —
+	well-formed voucher pools cannot cycle, since a pool points forward from
+	its outgoing legs to later inward events).
 	"""
-	return _CostLinkWalker(streams, links, inserted, context, recorded, tolerance, iteration_cap).run()
+	return _CostPoolWalker(streams, pools, inserted, context, recorded, tolerance, iteration_cap).run()
 
 
-class _CostLinkWalker:
+class _CostPoolWalker:
 	def __init__(
 		self,
 		streams: Mapping[str, list[Event]],
-		links: Collection[CostLink],
+		pools: Collection[CostPool],
 		inserted: tuple[str, Event],
 		context: EngineContext | Mapping[str, EngineContext],
 		recorded: Mapping[str, ReplayResult] | None,
@@ -81,17 +70,18 @@ class _CostLinkWalker:
 		iteration_cap: int,
 	) -> None:
 		self.streams = {key: list(events) for key, events in streams.items()}
-		self.links = tuple(links)
+		self.pools = tuple(pools)
 		self.trigger_key, self.trigger_event = inserted
 		self.context = context
 		self.recorded: dict[str, ReplayResult] = dict(recorded) if recorded else {}
 		self.tolerance = tolerance
 		self.iteration_cap = iteration_cap
+		self.key_of_event = {event.id: key for key, stream in self.streams.items() for event in stream}
 		self.recomputes: dict[str, ReplayResult] = {}
 		self.re_realized: list[Event] = []
 		self.invalidations: list[tuple[str, int]] = []
 		self.queue: deque[tuple[ReplayResult, dict[int, EventEffect]]] = deque()
-		self.fired_counts: Counter[CostLink] = Counter()
+		self.fired_counts: Counter[CostPool] = Counter()
 
 	def run(self) -> PropagationResult:
 		prior = self._trigger_prior()
@@ -101,47 +91,59 @@ class _CostLinkWalker:
 		self._record(self.trigger_key, self.trigger_event.id, recompute, prior)
 		while self.queue:
 			recompute, old_effects = self.queue.popleft()
-			for link, new_rate in self._fired_links(recompute, old_effects):
-				self._fire(link, new_rate)
+			for pool in self._fired_pools(recompute, old_effects):
+				self._fire(pool)
 		return PropagationResult(
 			self.recomputes, tuple(self.re_realized), self.streams, tuple(self.invalidations)
 		)
 
-	def _fired_links(
+	def _fired_pools(
 		self, recompute: ReplayResult, old_effects: dict[int, EventEffect]
-	) -> Iterator[tuple[CostLink, float]]:
-		for link in self.links:
-			effect = recompute.effects.get(link.source_event_id)
-			if effect is None:
-				continue  # cut 1: the recompute converged before this source
-			if effect.consumed_rate is None:
-				raise ValueError(f"link source {link.source_event_id} yielded no consumed_rate")
-			old = old_effects.get(link.source_event_id)
-			if (
-				old is not None
-				and old.consumed_rate is not None
-				and abs(effect.consumed_rate - old.consumed_rate) <= self.tolerance
-			):
-				continue  # cut 2: reached, but the rate did not change
-			yield link, effect.consumed_rate
+	) -> Iterator[CostPool]:
+		for pool in self.pools:
+			reached = [source for source in pool.sources if source in recompute.effects]
+			if not reached:
+				continue  # cut 1: the recompute converged before this pool's sources
+			if all(self._unchanged(source, recompute, old_effects) for source in reached):
+				continue  # cut 2: reached, but nothing the pool draws on moved
+			yield pool
 
-	def _fire(self, link: CostLink, new_rate: float) -> None:
-		self._guard(link)
-		prior = self._recorded_for(link.target_key)
-		event = self._re_realize(link, new_rate)
-		recompute = replay_after_insert(
-			self.streams[link.target_key], event, prior, self._context_for(link.target_key)
-		)
-		self.re_realized.append(event)
-		self._record(link.target_key, event.id, recompute, prior)
+	def _unchanged(self, source: int, recompute: ReplayResult, old_effects: dict[int, EventEffect]) -> bool:
+		old = old_effects.get(source)
+		if old is None:
+			return False
+		return abs(recompute.effects[source].value_delta - old.value_delta) <= self.tolerance
 
-	def _re_realize(self, link: CostLink, new_rate: float) -> Event:
-		stream = self.streams[link.target_key]
-		index = _index_of(stream, link.target_event_id)
+	def _fire(self, pool: CostPool) -> None:
+		"""Rebuild the pool, re-run its rule, and recompute every key it feeds."""
+		self._guard(pool)
+		values = allocate_pool(pool_value(pool, self._effect_for), pool.outputs, pool.rule)
+		# priors must be read before re-realization: they are what convergence compares against
+		priors = {output.key: self._recorded_for(output.key) for output in pool.outputs}
+		touched: dict[str, list[Event]] = {}
+		for output, value in zip(pool.outputs, values, strict=True):
+			event = self._re_realize(output, value)
+			self.re_realized.append(event)
+			touched.setdefault(output.key, []).append(event)
+		for key, events in touched.items():
+			earliest = min(events, key=lambda event: event.sort_key)
+			recompute = replay_after_insert(self.streams[key], earliest, priors[key], self._context_for(key))
+			self._record(key, earliest.id, recompute, priors[key])
+
+	def _re_realize(self, output: PooledLeg, value: float) -> Event:
+		stream = self.streams[output.key]
+		index = _index_of(stream, output.id)
 		old = stream[index]
-		rate = (new_rate * link.cost_share_qty + link.extra_cost) / old.qty_change
-		stream[index] = replace(old, declared_rate=rate)
+		if abs(old.qty_change - output.qty_change) > QTY_EPSILON:
+			raise ValueError(f"pooled output {output.id} disagrees with its event on quantity")
+		stream[index] = replace(old, declared_rate=pooled_rate(output, value))
 		return stream[index]
+
+	def _effect_for(self, source: int) -> EventEffect:
+		key = self.key_of_event.get(source)
+		if key is None:
+			raise ValueError(f"pool source {source} is not in any stream")
+		return self._recorded_for(key).effects[source]
 
 	def _record(self, key: str, from_event_id: int, recompute: ReplayResult, prior: ReplayResult) -> None:
 		self.invalidations.append((key, from_event_id))
@@ -151,11 +153,11 @@ class _CostLinkWalker:
 		)
 		self.queue.append((recompute, prior.effects))
 
-	def _guard(self, link: CostLink) -> None:
-		self.fired_counts[link] += 1
+	def _guard(self, pool: CostPool) -> None:
+		self.fired_counts[pool] += 1
 		total = sum(self.fired_counts.values())
-		if total > self.iteration_cap or self.fired_counts[link] > len(self.links) + 1:
-			raise RuntimeError("cost-link propagation did not converge; suspected cycle")
+		if total > self.iteration_cap or self.fired_counts[pool] > len(self.pools) + 1:
+			raise RuntimeError("cost-pool propagation did not converge; suspected cycle")
 
 	def _trigger_prior(self) -> ReplayResult:
 		if self.trigger_key in self.recorded:

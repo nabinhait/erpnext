@@ -1,22 +1,21 @@
 """Voucher-level fold: all legs of one voucher in one pass (design doc §2.5).
 
-A transfer's receiving leg cannot carry a rate up front — its rate IS the
-outgoing leg's realized cost, which only the fold can compute. CostLinkedLeg
-models that leg as a spec; apply_voucher realizes it into an ordinary Event
-once its source has folded, so coupled legs share one number in memory and
-nothing is ever written back into a document.
+A voucher's inward legs cannot carry a rate up front — their value is the cost
+the outgoing legs gave up, pooled with the voucher's fixed charges and split by
+a rule (pooling.py). apply_voucher folds the sources first, realizes a whole
+pool at once, then folds its outputs — so coupled legs share one number in
+memory and nothing is ever written back into a document.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
 
 from .apply import apply_event
 from .context import EngineContext
 from .event import Event, EventKind
-from .lots import Allocation
+from .pooling import CostPool, PooledLeg, allocate_pool, pool_value, realize_leg
 from .state import EventEffect, State
 
 _KIND_ORDER = {
@@ -27,7 +26,6 @@ _KIND_ORDER = {
 	EventKind.OPENING: 3,
 	EventKind.REVALUATION: 4,
 }
-_SHARE_TOLERANCE = 1e-9
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,47 +44,19 @@ class Leg:
 		return self.event.kind
 
 
-@dataclass(frozen=True, slots=True)
-class CostLinkedLeg:
-	"""An inward leg whose rate is the realized cost of `cost_from` — an
-	outgoing plain leg in the same voucher.
-
-	cost_share_qty is how many source units' cost this leg absorbs (defaults
-	to its own qty; a repack producing 25 from 50 consumed absorbs all 50).
-	extra_cost is an absolute amount (operating / landed cost) added on top:
-	declared_rate = (source_rate * cost_share_qty + extra_cost) / qty_change.
-	"""
-
-	key: str
-	id: int
-	posting_datetime: datetime
-	qty_change: float
-	cost_from: int
-	extra_cost: float = 0.0
-	cost_share_qty: float | None = None
-	allocations: tuple[Allocation, ...] = ()
-
-	def __post_init__(self) -> None:
-		if self.qty_change <= 0:
-			raise ValueError("a cost-linked leg is inward: qty_change must be > 0")
-		if self.cost_share_qty is not None and self.cost_share_qty <= 0:
-			raise ValueError("cost_share_qty must be > 0")
-
-	@property
-	def kind(self) -> EventKind:
-		return EventKind.RECEIPT
-
-	@property
-	def share_qty(self) -> float:
-		return self.cost_share_qty if self.cost_share_qty is not None else self.qty_change
-
-
-VoucherLeg = Leg | CostLinkedLeg
+VoucherLeg = Leg | PooledLeg
 
 
 @dataclass(frozen=True, slots=True)
 class Voucher:
-	legs: tuple[VoucherLeg, ...]
+	"""Plain legs, plus the cost pools whose outputs are valued by the fold."""
+
+	legs: tuple[Leg, ...]
+	pools: tuple[CostPool, ...] = ()
+
+	@property
+	def pooled_legs(self) -> tuple[PooledLeg, ...]:
+		return tuple(output for pool in self.pools for output in pool.outputs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,18 +77,20 @@ def apply_voucher(
 	"""Fold every leg of one voucher against `states` (missing key = State()).
 
 	Legs fold in intra-voucher kind order (Reversal < Issue < Assertion <
-	Receipt) then id, deferred where cost must flow forward: a cost-linked leg
-	folds after its source, and a source folds after cost-linked inflows to
-	its own key — which is what lets a chain A->B->C fold correctly. A cyclic
-	dependency (such as a swap A<->B in one voucher) raises ValueError.
+	Receipt) then id, deferred where cost must flow forward: a pooled leg folds
+	after its pool's sources, and a source folds after pooled inflows to its own
+	key from *other* pools — which is what lets a chain A->B->C fold correctly
+	while a manufacture may still consume from and produce into one warehouse. A
+	cyclic dependency (such as a swap A<->B in one voucher) raises ValueError.
 	`context` is one EngineContext for every key, or a mapping covering each key.
 	"""
 	new_states = dict(states)
 	effects: list[EventEffect] = []
 	realized: list[Leg] = []
 	effects_by_id: dict[int, EventEffect] = {}
+	realizer = _PoolRealizer(voucher.pools)
 	for leg in _order_legs_by_dependency(voucher):
-		event = leg.event if isinstance(leg, Leg) else _realize_leg(leg, effects_by_id)
+		event = leg.event if isinstance(leg, Leg) else realizer.realize(leg, effects_by_id)
 		state, effect = apply_event(new_states.get(leg.key, State()), event, _context_for(context, leg.key))
 		new_states[leg.key] = state
 		effects_by_id[event.id] = effect
@@ -127,27 +99,30 @@ def apply_voucher(
 	return VoucherResult(new_states, tuple(effects), tuple(realized))
 
 
-def _realize_leg(leg: CostLinkedLeg, effects_by_id: dict[int, EventEffect]) -> Event:
-	consumed_rate = effects_by_id[leg.cost_from].consumed_rate
-	if consumed_rate is None:
-		raise ValueError(f"source leg {leg.cost_from} yielded no consumed_rate")
-	declared_rate = (consumed_rate * leg.share_qty + leg.extra_cost) / leg.qty_change
-	return Event(
-		leg.id,
-		leg.posting_datetime,
-		EventKind.RECEIPT,
-		qty_change=leg.qty_change,
-		declared_rate=declared_rate,
-		allocations=leg.allocations,
-	)
+class _PoolRealizer:
+	"""Realizes a pool's outputs together — the rule needs every output at once."""
+
+	def __init__(self, pools: tuple[CostPool, ...]) -> None:
+		self.pool_of = {output.id: pool for pool in pools for output in pool.outputs}
+		self.events: dict[int, Event] = {}
+
+	def realize(self, leg: PooledLeg, effects_by_id: dict[int, EventEffect]) -> Event:
+		if leg.id not in self.events:
+			self._realize_pool(self.pool_of[leg.id], effects_by_id)
+		return self.events[leg.id]
+
+	def _realize_pool(self, pool: CostPool, effects_by_id: dict[int, EventEffect]) -> None:
+		values = allocate_pool(pool_value(pool, effects_by_id.__getitem__), pool.outputs, pool.rule)
+		for output, value in zip(pool.outputs, values, strict=True):
+			self.events[output.id] = realize_leg(output, value)
 
 
 def _order_legs_by_dependency(voucher: Voucher) -> list[VoucherLeg]:
 	"""Base order (kind, id), each leg deferred until its dependencies folded."""
 	by_id = _legs_by_id(voucher)
-	_validate_cost_links(voucher, by_id)
+	_validate_pools(voucher, by_id)
 	dependencies = _dependencies(voucher, by_id)
-	pending = sorted(voucher.legs, key=lambda leg: (_KIND_ORDER[leg.kind], leg.id))
+	pending = sorted(by_id.values(), key=lambda leg: (_KIND_ORDER[leg.kind], leg.id))
 	ordered: list[VoucherLeg] = []
 	done: set[int] = set()
 	while pending:
@@ -161,34 +136,39 @@ def _order_legs_by_dependency(voucher: Voucher) -> list[VoucherLeg]:
 
 
 def _legs_by_id(voucher: Voucher) -> dict[int, VoucherLeg]:
-	by_id = {leg.id: leg for leg in voucher.legs}
-	if len(by_id) != len(voucher.legs):
+	legs: tuple[VoucherLeg, ...] = (*voucher.legs, *voucher.pooled_legs)
+	by_id = {leg.id: leg for leg in legs}
+	if len(by_id) != len(legs):
 		raise ValueError("duplicate leg ids in voucher")
 	return by_id
 
 
-def _validate_cost_links(voucher: Voucher, by_id: dict[int, VoucherLeg]) -> None:
-	claimed: dict[int, float] = {}
-	for leg in voucher.legs:
-		if not isinstance(leg, CostLinkedLeg):
-			continue
-		source = by_id.get(leg.cost_from)
-		if not isinstance(source, Leg) or source.event.qty_change >= 0:
-			raise ValueError(f"cost_from={leg.cost_from} must reference an outgoing leg in the same voucher")
-		claimed[leg.cost_from] = claimed.get(leg.cost_from, 0.0) + leg.share_qty
-	for source_id, share in claimed.items():
-		if share > -by_id[source_id].event.qty_change + _SHARE_TOLERANCE:
-			raise ValueError(f"cost shares against leg {source_id} exceed its outgoing qty")
+def _validate_pools(voucher: Voucher, by_id: dict[int, VoucherLeg]) -> None:
+	claimed: set[int] = set()
+	for pool in voucher.pools:
+		for source_id in pool.sources:
+			source = by_id.get(source_id)
+			if not isinstance(source, Leg) or source.event.qty_change >= 0:
+				raise ValueError(f"source {source_id} must reference an outgoing leg in the same voucher")
+			if source_id in claimed:
+				raise ValueError(f"leg {source_id} feeds more than one cost pool")
+			claimed.add(source_id)
 
 
 def _dependencies(voucher: Voucher, by_id: dict[int, VoucherLeg]) -> dict[int, set[int]]:
-	dependencies: dict[int, set[int]] = {leg.id: set() for leg in voucher.legs}
-	linked = [leg for leg in voucher.legs if isinstance(leg, CostLinkedLeg)]
-	for leg in linked:
-		dependencies[leg.id].add(leg.cost_from)
-	for source_id in {leg.cost_from for leg in linked}:
-		source_key = by_id[source_id].key
-		dependencies[source_id] |= {leg.id for leg in linked if leg.key == source_key}
+	"""A pooled leg waits for its sources; a source waits for pooled inflows to its
+	own key — excluding its own pool's, so consuming and producing in one warehouse
+	is an ordinary voucher rather than a cycle."""
+	dependencies: dict[int, set[int]] = {leg_id: set() for leg_id in by_id}
+	for pool in voucher.pools:
+		own_outputs = {output.id for output in pool.outputs}
+		for output_id in own_outputs:
+			dependencies[output_id] |= set(pool.sources)
+		for source_id in pool.sources:
+			source_key = by_id[source_id].key
+			dependencies[source_id] |= {
+				leg.id for leg in voucher.pooled_legs if leg.key == source_key and leg.id not in own_outputs
+			}
 	return dependencies
 
 

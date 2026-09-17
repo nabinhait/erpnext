@@ -8,15 +8,23 @@ from .context import EngineContext
 from .event import Event, EventKind
 from .lots import Allocation, LotType
 from .policies import Fifo, Lifo, MovingAverage, StandardCost, ValuationPolicy
-from .propagate import CostLink, PropagationResult, propagate_cost_links
+from .pooling import (
+	CostAllocation,
+	CostPool,
+	PooledLeg,
+	ResidualByWeight,
+	allocate_pool,
+	pool_value,
+)
+from .propagate import PropagationResult, propagate_cost_pools
 from .replay import ReplayResult, replay, replay_after_insert, sort_events
 from .state import EventEffect, Layer, LotState, State
-from .voucher import CostLinkedLeg, Leg, Voucher, VoucherResult, apply_voucher
+from .voucher import Leg, Voucher, VoucherResult, apply_voucher
 
 __all__ = [
 	"Allocation",
-	"CostLink",
-	"CostLinkedLeg",
+	"CostAllocation",
+	"CostPool",
 	"EngineContext",
 	"Event",
 	"EventEffect",
@@ -28,16 +36,20 @@ __all__ = [
 	"LotState",
 	"LotType",
 	"MovingAverage",
+	"PooledLeg",
 	"PropagationResult",
 	"ReplayResult",
+	"ResidualByWeight",
 	"StandardCost",
 	"State",
 	"ValuationPolicy",
 	"Voucher",
 	"VoucherResult",
+	"allocate_pool",
 	"apply_event",
 	"apply_voucher",
-	"propagate_cost_links",
+	"pool_value",
+	"propagate_cost_pools",
 	"replay",
 	"replay_after_insert",
 	"sort_events",
